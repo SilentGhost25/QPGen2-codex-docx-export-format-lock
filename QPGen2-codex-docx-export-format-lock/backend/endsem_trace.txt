@@ -1,0 +1,2 @@
+generate-status 200
+{"id":7,"subject_id":3,"subject_name":"Natural Language Processing","subject_code":"21AI53","department_name":"Artificial Intelligence & Machine Learning","title":"End-Sem NLP Paper","exam_type":"End-Sem","semester":"6","batch":"2022-26","max_marks":100,"duration_minutes":180,"exam_date":"2026-04-30","teaching_department":"AIML","status":"draft","prompt_used":"Generate a module-balanced end-sem pa

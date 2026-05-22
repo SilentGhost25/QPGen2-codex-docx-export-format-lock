@@ -1,0 +1,61 @@
+Metadata-Version: 2.4
+Name: qpgen-backend
+Version: 0.1.0
+Summary: FastAPI backend for the AI Question Paper Generator
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi<1.0.0,>=0.115.0
+Requires-Dist: uvicorn[standard]<1.0.0,>=0.30.0
+Requires-Dist: sqlalchemy<3.0.0,>=2.0.36
+Requires-Dist: pydantic-settings<3.0.0,>=2.6.1
+Requires-Dist: pyjwt<3.0.0,>=2.9.0
+Requires-Dist: passlib[bcrypt]<2.0.0,>=1.7.4
+Requires-Dist: python-multipart<1.0.0,>=0.0.12
+Requires-Dist: python-docx<2.0.0,>=1.1.2
+Requires-Dist: pypdf<6.0.0,>=5.1.0
+Requires-Dist: pillow<12.0.0,>=11.0.0
+Requires-Dist: httpx<1.0.0,>=0.27.2
+Requires-Dist: tiktoken<1.0.0,>=0.5.0
+Requires-Dist: websockets<12.0.0,>=11.0.0
+Requires-Dist: sentence-transformers<6.0.0,>=3.0.0
+Requires-Dist: numpy<3.0.0,>=1.24.0
+Requires-Dist: slowapi<0.2.0,>=0.1.8
+Requires-Dist: python-pptx<2.0.0,>=1.0.0
+Provides-Extra: dev
+Requires-Dist: pytest<9.0.0,>=8.3.3; extra == "dev"
+Requires-Dist: pytest-cov<7.0.0,>=6.0.0; extra == "dev"
+
+# AI Question Paper Generator Backend
+
+FastAPI backend for the teacher, HOD, and admin workflows shown in the project framework.
+
+## What is included
+
+- JWT authentication with `teacher`, `hod`, and `admin` roles
+- Department and subject-aware RBAC
+- Question bank CRUD and document upload ingestion
+- Ollama-ready AI services targeting `llama3.2:3b`
+- Question paper generation, preview, submission, review, and DOCX export
+- Audit logs and admin dashboard summary
+- SQLite default for local setup, with `DATABASE_URL` override for PostgreSQL later
+
+## Quick start
+
+1. Create a virtual environment and install dependencies.
+2. Copy `.env.example` to `.env`.
+3. Run:
+
+```bash
+uvicorn app.main:app --reload --app-dir backend
+```
+
+If `ALLOW_DEMO_SEED=true`, the app seeds demo users:
+
+- `teacher@dsatm.edu` / `Teacher@123`
+- `hod@dsatm.edu` / `Hod@123`
+- `admin@dsatm.edu` / `Admin@123`
+
+## Notes
+
+- If Ollama is reachable, the backend will try to use `llama3.2:3b`.
+- If Ollama is unavailable, the system falls back to deterministic local parsing and paper selection so the flow remains testable.

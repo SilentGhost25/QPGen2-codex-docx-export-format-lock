@@ -1,0 +1,6 @@
+script-start
+app-imported
+client-open
+logged-in
+generate-status 200
+{"id":6,"subject_id":1,"subject_name":"Machine Learning","subject_code":"21AI51","department_name":"Artificial Intelligence & Machine Learning","title":"IAT-1 Question Paper","exam_type":"IAT-1","semester":"5","batch":"2022-26","max_marks":30,"duration_minutes":90,"exam_date":null,"teaching_department":"AIML","status":"draft","prompt_used":"Generate a balanced paper for CO1-CO3 with a mix of L1-L4

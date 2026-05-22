@@ -1,0 +1,23 @@
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+sqlalchemy>=2.0.36,<3.0.0
+pydantic-settings>=2.6.1,<3.0.0
+pyjwt>=2.9.0,<3.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+python-multipart>=0.0.12,<1.0.0
+python-docx>=1.1.2,<2.0.0
+pypdf>=5.1.0,<6.0.0
+pillow>=11.0.0,<12.0.0
+httpx>=0.27.2,<1.0.0
+tiktoken>=0.5.0,<1.0.0
+websockets>=11.0.0,<12.0.0
+sentence-transformers>=3.0.0,<6.0.0
+numpy>=1.24.0,<3.0.0
+slowapi>=0.1.8,<0.2.0
+python-pptx>=1.0.0,<2.0.0
+# PDF image/page extraction (multimodal pipeline)
+pymupdf>=1.24.0,<2.0.0
+# Optional upgrades for enhanced multimodal parsing:
+# paddlepaddle>=2.6.0   — enables PP-StructureV3 layout detection
+# paddleocr>=2.7.0      — enables PaddleOCR layout parser
+# nougat-ocr>=0.1.17    — enables Nougat formula OCR (large model download)
