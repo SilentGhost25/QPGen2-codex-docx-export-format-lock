@@ -383,6 +383,7 @@ def generate_questions_from_retrieval(
                 "co_mapping": slot.get("co", "CO1"),
                 "question_type": "theory",
                 "module": assigned_module,
+                "is_image_question": bool(slot.get("is_image_question")),
             })
     else:
         slots = _build_slot_plan(num_questions, marks_distribution, bloom_levels, co_targets, question_types)
@@ -438,14 +439,16 @@ def generate_questions_from_retrieval(
             total_retrieved += retrieval.total_retrieved
             logger.info("Module %d: retrieved %d chunks (cached)", mod, len(retrieval.contexts))
         except Exception as e:
-            logger.warning("Module %d: strict retrieval returned 0 chunks (%s). Trying fallback search without module constraint.", mod, e)
+            logger.warning("Module %d: strict retrieval returned 0 chunks (%s). Trying relaxed module-only retrieval.", mod, e)
             try:
                 retrieval = retrieve_for_generation(
-                    db, subject_id, "academic concepts",
-                    use_notes=True, use_question_bank=True,
-                    use_previous_papers=False, use_syllabus=True,
+                    db, subject_id, mod_query,
+                    use_notes=sources.get("use_notes", True),
+                    use_question_bank=sources.get("use_question_bank", True),
+                    use_previous_papers=sources.get("use_previous_papers", False),
+                    use_syllabus=sources.get("use_syllabus", True),
                     module_filter=mod,
-                    top_k=1,
+                    top_k=3,
                     teacher_id=teacher_id,
                 )
                 retrieval_cache[mod] = retrieval.contexts
@@ -457,45 +460,22 @@ def generate_questions_from_retrieval(
                 logger.warning("Module %d: both strict and fallback retrieval failed.", mod)
                 retrieval_cache[mod] = []
 
-    # If a module got 0 chunks, fall back to broadest retrieval
+    # If no module can retrieve context, fail before generation. We do not
+    # contaminate module tasks with global fallback context.
     if not all_contexts:
-        try:
-            broad = retrieve_for_generation(
-                db, subject_id, retrieval_query,
-                use_notes=True, use_question_bank=True,
-                use_previous_papers=False, use_syllabus=True,
-                top_k=5, teacher_id=teacher_id,
-            )
-            if not broad.contexts:
-                return GenerationResult(
-                    questions=[], retrieval_summary={"total_retrieved": 0, "error": "No relevant content found"},
-                    validation_summary={"total": 0, "valid": 0, "errors": 0},
-                    generation_time=time.time() - start, model_used="retrieval-empty",
-                    creativity_level=0.0, temperature=0.1,
-                )
-            for mod in modules_needed:
-                retrieval_cache[mod] = broad.contexts
-            all_contexts = broad.contexts
-            all_sources = broad.sources_used
-            all_topics = broad.topics_covered
-            total_retrieved = broad.total_retrieved
-        except Exception as e:
-            logger.error("Broad retrieval fallback failed: %s", e)
-            return GenerationResult(
-                questions=[], retrieval_summary={"total_retrieved": 0, "error": f"No relevant content found: {e}"},
-                validation_summary={"total": 0, "valid": 0, "errors": 0},
-                generation_time=time.time() - start, model_used="retrieval-empty",
-                creativity_level=0.0, temperature=0.1,
-            )
+        return GenerationResult(
+            questions=[],
+            retrieval_summary={"total_retrieved": 0, "error": "No module-scoped content found"},
+            validation_summary={"total": 0, "valid": 0, "errors": 0},
+            generation_time=time.time() - start,
+            model_used="retrieval-empty",
+            creativity_level=0.0,
+            temperature=0.1,
+        )
 
     for mod in modules_needed:
         if not retrieval_cache.get(mod):
-            # Try to populate with any chunks from all_contexts that belong to this module first
-            mod_chunks = [c for c in all_contexts if c.module_number == mod]
-            if mod_chunks:
-                retrieval_cache[mod] = mod_chunks
-            else:
-                retrieval_cache[mod] = all_contexts[:3]
+            retrieval_cache[mod] = [c for c in all_contexts if c.module_number == mod]
 
     # ---- 5. SEMAPHORE-BOUNDED MICRO-BATCH PARALLEL GENERATION ----
     import os

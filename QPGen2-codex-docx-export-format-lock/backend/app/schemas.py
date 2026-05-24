@@ -96,6 +96,7 @@ class GeneratePaperRequest(BaseModel):
     module_image_map: dict[int, bool] | None = None
     co_descriptions: dict[str, str] = Field(default_factory=dict)
     difficulty: str = "balanced"
+    exam_style: str | None = None
     instructions: str = "Instruction: Answer the following questions"
     manual_question_ids: list[int] = Field(default_factory=list)
     allow_ai_rewrite: bool = False

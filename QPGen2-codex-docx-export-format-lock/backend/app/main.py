@@ -78,7 +78,12 @@ from .ai_service import (
     select_questions_for_paper,
     summarize_question_bank,
 )
-from .generator import PaperConfig, build_question_blueprint, generate_question_paper
+from .generator import PaperConfig, generate_question_paper
+from .academic.orchestration.generation_healthcheck import run_generation_healthcheck
+from .academic.planning.blueprint_engine import build_paper_blueprint, blueprint_to_legacy_slots
+from .academic.policies import derive_difficulty_for_rbt
+from .academic.sanitization.response_cleaner import clean_question_text
+from .academic.validators.question_validator import validate_question_object
 
 # Import academic models so they are registered with Base.metadata
 from .academic.models import (  # noqa: F401
@@ -383,20 +388,25 @@ async def ai_generate_paper(
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
 
-    rbt_dist = payload.model_dump().get(
-        "rbt_levels", ["L1", "L2", "L3", "L4", "L5", "L6"]
-    )
-    rbt_dict = {rbt: 100 // len(rbt_dist) for rbt in rbt_dist}
-
     co_targets = payload.model_dump().get("co_targets", {})
     if not co_targets:
         co_targets = {f"CO{i}": 100 // 5 for i in range(1, 6)}
 
     modules = payload.model_dump().get("module_numbers", [1, 2, 3, 4, 5])
-    difficulty = payload.model_dump().get("difficulty", "medium")
     module_co_map = payload.module_co_map or {}
     module_image_map = payload.module_image_map or {}
-    blueprint = build_question_blueprint(payload.max_marks, module_co_map=module_co_map, module_image_map=module_image_map)
+    planned_blueprint = build_paper_blueprint(
+        max_marks=payload.max_marks,
+        modules=modules,
+        co_targets=co_targets,
+        module_co_map=module_co_map,
+        module_image_map=module_image_map,
+        exam_style=payload.exam_style,
+    )
+    blueprint = blueprint_to_legacy_slots(planned_blueprint)
+    rbt_dist = sorted({slot["rbt"] for slot in blueprint})
+    rbt_dict = {rbt: round(100 / max(len(rbt_dist), 1)) for rbt in rbt_dist}
+    difficulty = "backend_policy"
     manual_question_ids = list(dict.fromkeys(payload.manual_question_ids))
 
     if manual_question_ids:
@@ -435,6 +445,18 @@ async def ai_generate_paper(
             from .academic.generation import generate_questions_from_retrieval
             from .academic.retrieval import RetrievalError
 
+            health = run_generation_healthcheck(db, subject_id=payload.subject_id, modules=modules)
+            if not health.ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "Generation healthcheck failed",
+                        "errors": health.errors,
+                        "warnings": health.warnings,
+                        "stats": health.stats,
+                    },
+                )
+
             marks_dist = {}
             for slot in blueprint:
                 marks_dist[slot["marks"]] = marks_dist.get(slot["marks"], 0) + 1
@@ -446,7 +468,7 @@ async def ai_generate_paper(
                     subject_id=payload.subject_id,
                     num_questions=len(blueprint),
                     blueprint=blueprint,
-                    bloom_levels=payload.model_dump().get("rbt_levels", []),
+                    bloom_levels=rbt_dist,
                     co_targets=list(co_targets.keys()),
                     module_filter=modules[0] if len(modules) == 1 else None,
                     additional_instructions=payload.prompt,
@@ -472,25 +494,31 @@ async def ai_generate_paper(
 
             questions = []
             if len(valid_generated_questions) >= len(blueprint):
-                from .academic.sanitizer import sanitize_question_output
-                for gq in valid_generated_questions[: len(blueprint)]:
-                    cleaned_text = sanitize_question_output(gq.text)
+                for index, gq in enumerate(valid_generated_questions[: len(blueprint)]):
+                    task = planned_blueprint.tasks[index]
+                    cleaned_text = clean_question_text(gq.text)
+                    validation = validate_question_object(cleaned_text, task)
+                    if not validation.ok:
+                        logger.warning("Generated question failed object validation: %s", validation.errors)
+                        continue
                     q_row = Question(
                         subject_id=payload.subject_id,
                         teacher_id=user.id,
                         text=cleaned_text,
-                        marks=gq.marks,
-                        course_outcome=gq.co_mapping,
-                        bloom_level=gq.bloom_level,
-                        difficulty="medium",
-                        module_number=gq.module_number or 1,
+                        marks=task.marks,
+                        course_outcome=task.co,
+                        bloom_level=task.rbt,
+                        difficulty=task.difficulty,
+                        module_number=task.module,
                         tags=["rag-generated"],
-                        is_verified=gq.confidence >= 0.8,
+                        is_verified=gq.confidence >= 0.8 and validation.ok,
                     )
                     db.add(q_row)
                     db.flush()
                     q_row._confidence = gq.confidence
                     q_row._source_documents = gq.source_documents
+                    q_row._figure_image_paths = gq.figure_image_paths
+                    q_row._validation_warnings = validation.warnings
                     questions.append(q_row)
 
             if len(questions) < len(blueprint):
@@ -577,14 +605,19 @@ async def ai_generate_paper(
     questions_data = [
         {
             "id": q.id,
-            "text": q.text,
+            "text": clean_question_text(q.text),
             "marks": blueprint[index]["marks"],
-            "course_outcome": q.course_outcome,
-            "bloom_level": q.bloom_level,
-            "difficulty": q.difficulty,
-            "module_number": q.module_number,
+            "course_outcome": blueprint[index]["co"],
+            "bloom_level": blueprint[index]["rbt"],
+            "difficulty": derive_difficulty_for_rbt(blueprint[index]["rbt"]),
+            "module_number": blueprint[index]["module_number"],
+            "question_number": blueprint[index]["question_number"],
+            "subpart": blueprint[index]["subpart"],
+            "section_label": blueprint[index]["label"],
             "confidence": getattr(q, "_confidence", None),
             "source_documents": getattr(q, "_source_documents", []),
+            "figure_image_paths": getattr(q, "_figure_image_paths", []),
+            "validation_warnings": getattr(q, "_validation_warnings", []),
         }
         for index, q in enumerate(questions[: len(blueprint)])
     ]
@@ -600,10 +633,10 @@ async def ai_generate_paper(
             payload.prompt,
         )
         if rewritten:
-            questions_data = rewritten
-
-    if not manual_question_ids:
-        random.shuffle(questions_data)
+            questions_data = [
+                {**original, "text": rewritten_item.get("text", original["text"])}
+                for original, rewritten_item in zip(questions_data, rewritten)
+            ]
 
     questions_data = [
         {
@@ -612,8 +645,14 @@ async def ai_generate_paper(
             "course_outcome": item.get("course_outcome", ""),
             "bloom_level": item.get("bloom_level", ""),
             "module_number": item.get("module_number"),
+            "difficulty": item.get("difficulty"),
+            "question_number": item.get("question_number"),
+            "subpart": item.get("subpart"),
+            "section_label": item.get("section_label"),
             "confidence": item.get("confidence"),
             "source_documents": item.get("source_documents", []),
+            "figure_image_paths": item.get("figure_image_paths", []),
+            "validation_warnings": item.get("validation_warnings", []),
         }
         for item in questions_data
     ]
@@ -644,6 +683,20 @@ async def ai_generate_paper(
             "co_targets": co_targets,
             "co_descriptions": payload.co_descriptions,
             "difficulty": difficulty,
+            "exam_style": planned_blueprint.pattern,
+            "planned_blueprint": {
+                "pattern": planned_blueprint.pattern,
+                "blocks": [
+                    {
+                        "qno": block.qno,
+                        "module": block.module,
+                        "type": block.type,
+                        "is_or": block.is_or,
+                        "labels": [task.label for task in block.subquestions],
+                    }
+                    for block in planned_blueprint.blocks
+                ],
+            },
             "manual_question_ids": manual_question_ids,
             "instructions": payload.instructions,
             "template_note": (
@@ -669,9 +722,9 @@ async def ai_generate_paper(
                 question_id=q.id,
                 order_index=idx,
                 section_label=slot["label"],
-                option_group=f"CHOICE-{((slot['question_number'] - 1) // 2) + 1}",
+                option_group=f"MODULE-{slot['module_number']}-Q{(slot['question_number'] + 1) // 2}",
                 custom_marks=slot["marks"],
-                question_text_snapshot=q.text,
+                question_text_snapshot=clean_question_text(q.text),
             )
         )
 

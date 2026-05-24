@@ -166,7 +166,7 @@ def build_question_rows(
             current_module = int(slot["module_number"])
             rows.append({"type": "module", "title": f"Module - {current_module}"})
 
-        if slot["subpart"] == "a" and slot["question_number"] % 2 == 0:
+        if (slot["subpart"] == "a" or slot["subpart"] == "") and slot["question_number"] % 2 == 0:
             rows.append({"type": "or"})
 
         rows.append(
@@ -200,7 +200,6 @@ class DSATMQuestionPaperGenerator:
         self._add_instruction(document, config)
         self._add_questions_table(document, config, questions)
         self._add_course_outcomes_table(document, config)
-        self._add_coverage_page(document, config)
         return document
 
     def save(self, document: DocumentType, output_path: Path) -> Path:
@@ -729,53 +728,6 @@ class DSATMQuestionPaperGenerator:
             self._set_cell(
                 table.rows[index - 1].cells[1],
                 config.co_descriptions.get(co_key, ""),
-            )
-
-    def _add_coverage_page(self, document: DocumentType, config: PaperConfig) -> None:
-        document.add_page_break()
-        co_heading = document.add_paragraph()
-        run = co_heading.add_run("Percentage of CO Coverage")
-        self._style_run(run, size=9, bold=True)
-
-        co_table = document.add_table(rows=2, cols=6)
-        co_table.alignment = WD_TABLE_ALIGNMENT.LEFT
-        co_table.autofit = False
-        self._set_table_borders(co_table)
-        self._set_table_fixed_layout(co_table)
-        for index in range(6):
-            co_table.columns[index].width = Inches(1.2 if index else 1.4)
-        self._set_cell(co_table.rows[0].cells[0], "Course Outcomes", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-        self._set_cell(co_table.rows[1].cells[0], "Percentage", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-        for index in range(1, 6):
-            co_key = f"CO{index}"
-            self._set_cell(co_table.rows[0].cells[index], co_key, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-            self._set_cell(
-                co_table.rows[1].cells[index],
-                str(config.co_percentages.get(co_key, 0)),
-                align=WD_ALIGN_PARAGRAPH.CENTER,
-            )
-
-        module_heading = document.add_paragraph()
-        module_heading.paragraph_format.space_before = Pt(12)
-        run = module_heading.add_run("Percentage of Syllabus coverage")
-        self._style_run(run, size=9, bold=True)
-
-        module_table = document.add_table(rows=2, cols=6)
-        module_table.alignment = WD_TABLE_ALIGNMENT.LEFT
-        module_table.autofit = False
-        self._set_table_borders(module_table)
-        self._set_table_fixed_layout(module_table)
-        for index in range(6):
-            module_table.columns[index].width = Inches(1.05 if index else 1.55)
-        self._set_cell(module_table.rows[0].cells[0], "Modules Covered", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-        self._set_cell(module_table.rows[1].cells[0], "Percentage", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-        for index in range(1, 6):
-            module_key = index
-            self._set_cell(module_table.rows[0].cells[index], str(module_key), bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
-            self._set_cell(
-                module_table.rows[1].cells[index],
-                str(config.module_percentages.get(str(module_key), config.module_percentages.get(module_key, 0))),
-                align=WD_ALIGN_PARAGRAPH.CENTER,
             )
 
 

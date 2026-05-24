@@ -392,67 +392,6 @@ export function PaperPreview({
           </tbody>
         </table>
       </div>
-
-      <div className="mt-10 space-y-5">
-        <div>
-          <p className="mb-1 text-[11px] font-bold">Percentage of CO Coverage</p>
-          <table className="w-full border-collapse text-[11px]">
-            <tbody>
-              <tr>
-                <td className="border border-black px-2 py-1 text-center font-bold">
-                  Course Outcomes
-                </td>
-                {["CO1", "CO2", "CO3", "CO4", "CO5"].map((co) => (
-                  <td key={co} className="border border-black px-2 py-1 text-center font-bold">
-                    {co}
-                  </td>
-                ))}
-              </tr>
-              <tr>
-                <td className="border border-black px-2 py-1 text-center font-bold">
-                  Percentage
-                </td>
-                {["CO1", "CO2", "CO3", "CO4", "CO5"].map((co) => (
-                  <td key={co} className="border border-black px-2 py-1 text-center">
-                    {coPercentages[co]}
-                  </td>
-                ))}
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div>
-          <p className="mb-1 text-[11px] font-bold">Percentage of Syllabus coverage</p>
-          <table className="w-full border-collapse text-[11px]">
-            <tbody>
-              <tr>
-                <td className="border border-black px-2 py-1 text-center font-bold">
-                  Modules Covered
-                </td>
-                {["1", "2", "3", "4", "5"].map((module) => (
-                  <td
-                    key={module}
-                    className="border border-black px-2 py-1 text-center font-bold"
-                  >
-                    {module}
-                  </td>
-                ))}
-              </tr>
-              <tr>
-                <td className="border border-black px-2 py-1 text-center font-bold">
-                  Percentage
-                </td>
-                {["1", "2", "3", "4", "5"].map((module) => (
-                  <td key={module} className="border border-black px-2 py-1 text-center">
-                    {modulePercentages[module]}
-                  </td>
-                ))}
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
     </div>
   );
 }

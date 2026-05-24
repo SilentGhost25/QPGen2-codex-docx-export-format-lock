@@ -10,10 +10,19 @@ from typing import Any
 # Global Course Outcome (CO) to Revised Bloom's Taxonomy (RBT) allowed levels policy
 CO_RBT_POLICY = {
     "CO1": ["L1", "L2"],
-    "CO2": ["L2", "L3"],
-    "CO3": ["L3", "L4"],
-    "CO4": ["L4", "L5"],
-    "CO5": ["L5", "L6"],
+    "CO2": ["L3"],
+    "CO3": ["L4"],
+    "CO4": ["L5"],
+    "CO5": ["L6"],
+}
+
+RBT_DIFFICULTY_POLICY = {
+    "L1": "easy",
+    "L2": "easy",
+    "L3": "medium",
+    "L4": "medium",
+    "L5": "hard",
+    "L6": "hard",
 }
 
 # Standard Bloom's levels action verbs for engineering/technical curricula (e.g., VTU)
@@ -34,6 +43,17 @@ def get_allowed_rbt(co: str) -> list[str]:
         if key in clean_co:
             return CO_RBT_POLICY[key]
     return ["L1", "L2"]
+
+
+def derive_rbt_for_co(co: str, *, slot_index: int = 0) -> str:
+    """Return the deterministic backend-owned RBT for a CO."""
+    allowed = get_allowed_rbt(co)
+    return allowed[slot_index % len(allowed)]
+
+
+def derive_difficulty_for_rbt(rbt: str) -> str:
+    """Difficulty is backend policy, never frontend authority."""
+    return RBT_DIFFICULTY_POLICY.get(rbt.strip().upper(), "medium")
 
 def validate_co_rbt_alignment(co: str, rbt: str) -> bool:
     """Deterministically checks if the RBT level is academically valid for the targeted CO."""

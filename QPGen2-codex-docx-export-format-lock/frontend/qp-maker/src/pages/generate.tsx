@@ -135,10 +135,16 @@ export default function GeneratePaper() {
   const [generatedPaper, setGeneratedPaper] = useState<GeneratedPaper | null>(null);
   const [manualSearch, setManualSearch] = useState("");
   const [manualSelectedIds, setManualSelectedIds] = useState<number[]>([]);
-  const [difficultyDist, setDifficultyDist] = useState({ easy: 30, medium: 50, hard: 20 });
   const [selectedModules, setSelectedModules] = useState<number[]>([1, 2, 3, 4, 5]);
   const [coTargets, setCoTargets] = useState<Record<string, number>>({ 
     "CO1": 20, "CO2": 20, "CO3": 20, "CO4": 20, "CO5": 20 
+  });
+  const [moduleCOMap, setModuleCOMap] = useState<Record<number, string>>({
+    1: "CO1",
+    2: "CO2",
+    3: "CO3",
+    4: "CO4",
+    5: "CO5",
   });
   const [moduleImageMap, setModuleImageMap] = useState<Record<number, boolean>>({});
   const [coDescriptions, setCoDescriptions] = useState<Record<string, string>>({
@@ -344,13 +350,6 @@ export default function GeneratePaper() {
     }
     const durationMinutes = values.duration.includes('1.5') ? 90 : parseInt(values.duration) * 60 || 60;
     const subject = subjectsData.find(s => s.id.toString() === values.subjectId);
-    const difficultyPreference = Object.entries(difficultyDist).sort((left, right) => right[1] - left[1]);
-    const difficulty =
-      difficultyPreference.length > 1 &&
-      Math.abs(difficultyPreference[0][1] - difficultyPreference[1][1]) < 10
-        ? "balanced"
-        : difficultyPreference[0]?.[0] || "balanced";
-
     if (!isAutoGenerate && manualSelectedIds.length !== requiredQuestionCount) {
       toast.error(`Select exactly ${requiredQuestionCount} questions for this template.`);
       return;
@@ -366,14 +365,13 @@ export default function GeneratePaper() {
       duration_minutes: durationMinutes,
       exam_date: values.dateOfIat || undefined,
       teaching_department: values.teachingDept,
-      prompt: `Generate ${values.examType} paper for ${subject?.name} covering modules ${selectedModules.join(", ")} with RBT levels ${values.rbtLevels.join(", ")} and CO targets ${Object.entries(coTargets).map(([co, value]) => `${co}:${value}%`).join(", ")}`,
+      prompt: `Generate ${values.examType} paper for ${subject?.name} covering modules ${selectedModules.join(", ")}`,
       rbt_levels: values.rbtLevels,
       module_numbers: selectedModules,
       module_image_map: moduleImageMap,
+      module_co_map: moduleCOMap,
       co_targets: coTargets,
       co_descriptions: coDescriptions,
-      difficulty_distribution: difficultyDist,
-      difficulty,
       instructions: instructions,
       manual_question_ids: isAutoGenerate ? undefined : manualSelectedIds,
       creativity: useRag ? ragCreativity[0] / 100 : 0.7,
@@ -788,62 +786,51 @@ export default function GeneratePaper() {
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Difficulty Distribution</h3>
-                      <div className="space-y-6 bg-muted/20 p-6 rounded-lg border border-muted/50">
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center">
-                            <Label>Easy (L1, L2)</Label>
-                            <span className="text-sm font-medium">{difficultyDist.easy}%</span>
-                          </div>
-                          <Slider 
-                            value={[difficultyDist.easy]} 
-                            max={100} 
-                            step={5} 
-                            onValueChange={(val) => setDifficultyDist(prev => ({ ...prev, easy: val[0] }))}
-                          />
-                        </div>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center">
-                            <Label>Medium (L3, L4)</Label>
-                            <span className="text-sm font-medium">{difficultyDist.medium}%</span>
-                          </div>
-                          <Slider 
-                            value={[difficultyDist.medium]} 
-                            max={100} 
-                            step={5} 
-                            onValueChange={(val) => setDifficultyDist(prev => ({ ...prev, medium: val[0] }))}
-                          />
-                        </div>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center">
-                            <Label>Hard (L5, L6)</Label>
-                            <span className="text-sm font-medium">{difficultyDist.hard}%</span>
-                          </div>
-                          <Slider 
-                            value={[difficultyDist.hard]} 
-                            max={100} 
-                            step={5} 
-                            onValueChange={(val) => setDifficultyDist(prev => ({ ...prev, hard: val[0] }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">CO Coverage Targets</h3>
-                      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                        {["CO1", "CO2", "CO3", "CO4", "CO5"].map((co) => (
-                          <div key={co} className="space-y-2 p-4 border rounded-lg bg-card">
-                            <Label className="text-center block w-full">{co}</Label>
-                            <Input 
-                              type="number" 
-                              value={coTargets[co]} 
-                              onChange={(e) => setCoTargets(prev => ({ ...prev, [co]: parseInt(e.target.value) || 0 }))}
-                              className="text-center" 
-                            />
-                            <span className="text-xs text-center block text-muted-foreground">%</span>
-                          </div>
-                        ))}
+                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Module Course Outcome (CO) Mapping</h3>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        {selectedModules.map((moduleNumber) => {
+                          const currentCO = moduleCOMap[moduleNumber] || `CO${Math.min(moduleNumber, 5)}`;
+                          const CO_TO_RBT: Record<string, string> = {
+                            CO1: "L1/L2",
+                            CO2: "L3",
+                            CO3: "L4",
+                            CO4: "L5",
+                            CO5: "L6",
+                          };
+                          
+                          return (
+                            <div key={moduleNumber} className="p-4 border rounded-lg bg-card/50 backdrop-blur-sm flex items-center justify-between gap-4 hover:shadow-md hover:bg-card/75 transition-all duration-300">
+                              <div className="space-y-1">
+                                <span className="font-bold text-sm text-primary block">Module {moduleNumber}</span>
+                                <span className="text-xs text-muted-foreground">Target Outcome Mapping</span>
+                              </div>
+                              
+                              <div className="flex items-center gap-3">
+                                {/* Interactive RBT Preview Badge */}
+                                <div className="px-2.5 py-1 rounded-md bg-primary/10 border border-primary/20 text-xs font-mono font-bold text-primary shadow-sm">
+                                  {CO_TO_RBT[currentCO]}
+                                </div>
+                                
+                                <select
+                                  value={currentCO}
+                                  onChange={(e) => {
+                                    setModuleCOMap((prev) => ({
+                                      ...prev,
+                                      [moduleNumber]: e.target.value,
+                                    }));
+                                  }}
+                                  className="px-3 py-1.5 rounded-md border border-input bg-background/50 hover:bg-background text-sm font-semibold transition-all focus:outline-none focus:ring-2 focus:ring-primary shadow-sm cursor-pointer"
+                                >
+                                  <option value="CO1">CO1</option>
+                                  <option value="CO2">CO2</option>
+                                  <option value="CO3">CO3</option>
+                                  <option value="CO4">CO4</option>
+                                  <option value="CO5">CO5</option>
+                                </select>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
 

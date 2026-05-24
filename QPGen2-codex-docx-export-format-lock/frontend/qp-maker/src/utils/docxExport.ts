@@ -63,13 +63,14 @@ type PaperRow =
       subQuestions?: Array<{ label?: string; text: string }>;
     };
 
-function tr(text: string | number, options: { bold?: boolean; italics?: boolean; size?: number } = {}) {
+function tr(text: string | number, options: { bold?: boolean; italics?: boolean; size?: number; color?: string } = {}) {
   return new TextRun({
     text: String(text ?? ""),
     font: FONT,
     size: options.size ?? BODY_SIZE,
     bold: options.bold,
     italics: options.italics,
+    color: options.color,
   });
 }
 

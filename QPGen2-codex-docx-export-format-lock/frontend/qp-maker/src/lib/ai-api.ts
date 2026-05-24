@@ -124,7 +124,8 @@ export interface GeneratePaperParams {
   prompt: string;
   rbt_levels: string[];
   module_numbers: number[];
-  difficulty_distribution?: Record<string, number>;
+  module_co_map?: Record<number, string>;
+  module_image_map?: Record<number, boolean>;
   co_targets?: Record<string, number>;
   co_descriptions?: Record<string, string>;
   difficulty?: string;
