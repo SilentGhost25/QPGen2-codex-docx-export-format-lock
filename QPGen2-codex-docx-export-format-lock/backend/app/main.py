@@ -1,4 +1,8 @@
 from __future__ import annotations
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TQDM_DISABLE"] = "1"
+
 import logging
 import random
 from collections import defaultdict

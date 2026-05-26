@@ -14,6 +14,11 @@ import numpy as np
 
 logger = logging.getLogger("app.academic.embeddings")
 
+# Silence noisy external library loggers
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
+
 # ---------------------------------------------------------------------------
 # Singleton embedding model
 # ---------------------------------------------------------------------------
@@ -68,7 +73,7 @@ def generate_embedding(text: str) -> list[float] | None:
     if model is None:
         return None
     try:
-        vector = model.encode(text, normalize_embeddings=True)
+        vector = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
         return vector.tolist()
     except Exception as e:
         logger.error("Embedding generation failed: %s", e)
@@ -81,7 +86,7 @@ def generate_embeddings_batch(texts: list[str]) -> list[list[float] | None]:
     if model is None:
         return [None] * len(texts)
     try:
-        vectors = model.encode(texts, normalize_embeddings=True, batch_size=32)
+        vectors = model.encode(texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False)
         return [v.tolist() for v in vectors]
     except Exception as e:
         logger.error("Batch embedding failed: %s", e)

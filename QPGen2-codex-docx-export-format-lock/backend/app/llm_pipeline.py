@@ -483,7 +483,7 @@ class DuplicateFilter:
     def _get_embedding(self, text: str) -> np.ndarray:
         """Get cached embedding or compute new."""
         if text not in self.cache:
-            self.cache[text] = self.embedder.encode(text)
+            self.cache[text] = self.embedder.encode(text, show_progress_bar=False)
         return self.cache[text]
 
     def _cosine_similarity(self, vec_a: np.ndarray, vec_b: np.ndarray) -> float:
