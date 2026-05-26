@@ -9,6 +9,7 @@ Roles:
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -289,20 +290,95 @@ Requirements:
 - Do NOT repeat wording from original
 - Stay within same topic
 - Follow difficulty rules strictly
-- Return ONLY valid JSON: {{"question":"..."}}
+- Return ONLY the question text
+- No JSON
+- No markdown
+- No numbering
+- No explanation
 
 Generate the new question:
 """
         
-        response = self.llm(prompt, system)
+        response = self.llm.generate_text(prompt, system)
         
-        if isinstance(response, dict) and isinstance(response.get("question"), str):
-            new_q = response["question"].strip()
+        if response:
+            new_q = response.strip()
+            # Clean up markdown code blocks if the model wrapped it
+            new_q = re.sub(r'```.*?```', '', new_q, flags=re.S)
+            new_q = re.sub(r'^\s*Question\s*:\s*', '', new_q, flags=re.IGNORECASE)
+            new_q = re.sub(r'^\s*Show\s*:\s*', '', new_q, flags=re.IGNORECASE)
+            new_q = new_q.strip()
             if new_q and len(new_q) > 10:
                 logger.info(f"Generated {difficulty} question: {new_q[:50]}...")
                 return new_q
         
         logger.warning(f"Generation failed for {difficulty} question")
+        return None
+
+
+class ImageQuestionGenerator:
+    """Generate questions referencing an image/diagram based on its description."""
+
+    def __init__(self, llm_call: LLMCall = None):
+        self.llm = llm_call or LLMCall()
+
+    def generate(
+        self,
+        figure_description: str,
+        topic: str,
+        difficulty: str,
+        subject_code: str = "N/A",
+    ) -> str | None:
+        """Generate a new question referencing a diagram."""
+        
+        rules = _difficulty_rules(difficulty)
+        
+        system = (
+            "You are an expert exam question designer for engineering students. "
+            "Generate high-quality exam questions that are clear and unambiguous."
+        )
+        
+        prompt = f"""
+Generate a NEW exam question based on the provided figure description.
+The question MUST explicitly reference 'the given figure' or 'the given diagram' (e.g. 'Explain the process shown in the given figure...').
+
+Topic: {topic}
+Subject Code: {subject_code}
+Difficulty: {difficulty}
+
+Difficulty Rules:
+{rules}
+
+Figure Description:
+{figure_description}
+
+Requirements:
+- MUST reference the figure/diagram in the question text.
+- Stay within same topic
+- Follow difficulty rules strictly
+- Return ONLY the question text
+- No JSON
+- No markdown
+- No numbering
+- No explanation
+
+Generate the new question:
+"""
+        
+        response = self.llm.generate_text(prompt, system)
+        
+        if response:
+            new_q = response.strip()
+            # Clean up markdown code blocks if the model wrapped it
+            new_q = re.sub(r'```.*?```', '', new_q, flags=re.S)
+            new_q = re.sub(r'^\s*Question\s*:\s*', '', new_q, flags=re.IGNORECASE)
+            new_q = re.sub(r'^\s*Show\s*:\s*', '', new_q, flags=re.IGNORECASE)
+            new_q = new_q.strip()
+            if new_q and len(new_q) > 10:
+                logger.info(f"Generated {difficulty} image question: {new_q[:50]}...")
+                return new_q
+        
+        logger.warning(f"Generation failed for {difficulty} image question")
         return None
 
 

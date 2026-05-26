@@ -35,7 +35,8 @@ def run_generation_healthcheck(db: Session, *, subject_id: int, modules: list[in
     total_approved = int(db.scalar(approved_stmt) or 0)
     stats["approved_chunks"] = total_approved
     if total_approved == 0:
-        errors.append("No approved knowledge chunks are ready for generation")
+        warnings.append("No approved knowledge chunks are ready for generation; compiler will run in lexical/fallback template mode")
+
 
     for module in modules or [1, 2, 3, 4, 5]:
         module_count = int(

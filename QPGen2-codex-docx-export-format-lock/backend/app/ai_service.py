@@ -177,13 +177,26 @@ class OllamaClient:
             logger.warning("Ollama request failed: %s", exc)
             return None
 
+    _cached_availability: bool | None = None
+    _last_check_time: float = 0.0
+
     async def is_available(self) -> bool:
+        import time
+        now = time.time()
+        if OllamaClient._cached_availability is not None and (now - OllamaClient._last_check_time) < 60.0:
+            return OllamaClient._cached_availability
         try:
             async with httpx.AsyncClient(timeout=settings.ollama_health_timeout_seconds) as client:
                 response = await client.get(f"{self.base_url}/api/tags")
-                return response.status_code == 200
+                status = response.status_code == 200
+                OllamaClient._cached_availability = status
+                OllamaClient._last_check_time = now
+                return status
         except Exception:
+            OllamaClient._cached_availability = False
+            OllamaClient._last_check_time = now
             return False
+
 
     async def rephrase_questions(
         self,
@@ -826,11 +839,11 @@ def _build_generation_prompt(
             },
             "template_slots": [
                 {
-                    "slot_label": slot["label"],
-                    "question_number": slot["question_number"],
-                    "subpart": slot["subpart"],
-                    "slot_marks": slot["marks"],
-                    "module_number": slot["module_number"],
+                    "slot_label": slot.label if hasattr(slot, "label") else slot["label"],
+                    "question_number": slot.question_number if hasattr(slot, "question_number") else slot["question_number"],
+                    "subpart": slot.subpart if hasattr(slot, "subpart") else slot["subpart"],
+                    "slot_marks": slot.marks if hasattr(slot, "marks") else slot["marks"],
+                    "module_number": slot.module if hasattr(slot, "module") else slot["module_number"],
                 }
                 for slot in blueprint
             ],
@@ -859,7 +872,7 @@ def _parse_ai_assignments(
     if not isinstance(assignments, list):
         return []
 
-    slot_order = [slot["label"] for slot in blueprint]
+    slot_order = [slot.label if hasattr(slot, "label") else slot["label"] for slot in blueprint]
     assignment_map: dict[str, int] = {}
     used_ids: set[int] = set()
     for assignment in assignments:
@@ -937,7 +950,7 @@ async def select_questions_for_paper(
     prompt: str | None = None,
 ) -> SelectionResult:
     blueprint = build_question_blueprint(max_marks)
-    slot_marks = [int(slot["marks"]) for slot in blueprint]
+    slot_marks = [int(slot.marks if hasattr(slot, "marks") else slot["marks"]) for slot in blueprint]
     client = OllamaClient()
     stmt = select(Question).where(Question.subject_id == subject_id)
     if modules:
@@ -974,7 +987,9 @@ async def select_questions_for_paper(
         if not remaining or len(heuristic_selected) >= min(slot_count, len(candidates)):
             break
         target_module = (
-            int(slot["module_number"]) if slot.get("module_number") is not None else None
+            int(slot.module if hasattr(slot, "module") else slot["module_number"])
+            if (hasattr(slot, "module") or (isinstance(slot, dict) and slot.get("module_number") is not None))
+            else None
         )
         slot_candidates = (
             [question for question in remaining if question.module_number == target_module]
@@ -992,7 +1007,7 @@ async def select_questions_for_paper(
                 uncovered_modules,
                 target_module,
                 difficulty,
-                int(slot["marks"]),
+                int(slot.marks if hasattr(slot, "marks") else slot["marks"]),
             ),
             reverse=True,
         )

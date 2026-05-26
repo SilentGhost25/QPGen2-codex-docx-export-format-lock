@@ -243,10 +243,22 @@ def _parse_pdf_structured(
         logger.warning("pypdf text extraction failed: %s", exc)
         page_texts = {}
 
-    # Step 2: Extract embedded images
-    embedded_images = extract_images_from_pdf(content)
+    # Step 2: Extract embedded images with deduplication and size filtering
+    embedded_images_raw = extract_images_from_pdf(content)
     images_by_page: dict[int, list] = {}
-    for img in embedded_images:
+    seen_hashes = set()
+    
+    import hashlib
+    for img in embedded_images_raw:
+        # AcademicImageFilter: skip tiny images/icons
+        if getattr(img, "width", 0) < 100 or getattr(img, "height", 0) < 100:
+            continue
+            
+        img_hash = hashlib.md5(img.image_bytes).hexdigest()
+        if img_hash in seen_hashes:
+            continue
+        seen_hashes.add(img_hash)
+        
         images_by_page.setdefault(img.page_number, []).append(img)
 
     # Step 3: Try page renders for layout detection (only if PyMuPDF available)
@@ -493,6 +505,8 @@ def _parse_image_structured(
 def _parse_text_document_structured(
     content: bytes,
     file_name: str,
+    storage_dir: Path,
+    analyze_figures: bool = True,
 ) -> StructuredDocument:
     """Parse DOCX, PPTX, TXT, MD into structured pages using layout heuristics."""
     from .layout_parser import parse_text_layout, BLOCK_TYPE_EQUATION, BLOCK_TYPE_TABLE
@@ -677,10 +691,14 @@ def parse_document_structure(
                 extract_math=extract_math,
             )
         elif suffix in (".docx", ".pptx", ".ppt", ".txt", ".md", ".csv"):
-            return _parse_text_document_structured(content, file_name)
+            return _parse_text_document_structured(
+                content, file_name, storage_dir, analyze_figures=analyze_figures
+            )
         else:
             # Unknown format — treat as text
-            return _parse_text_document_structured(content, file_name)
+            return _parse_text_document_structured(
+                content, file_name, storage_dir, analyze_figures=analyze_figures
+            )
 
     except Exception as exc:
         logger.error("Structured parsing failed for '%s': %s", file_name, exc)

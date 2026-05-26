@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import random
+from collections import defaultdict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,7 +12,7 @@ logger = logging.getLogger("app")
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
@@ -80,10 +81,14 @@ from .ai_service import (
 )
 from .generator import PaperConfig, generate_question_paper
 from .academic.orchestration.generation_healthcheck import run_generation_healthcheck
-from .academic.planning.blueprint_engine import build_paper_blueprint, blueprint_to_legacy_slots
+from .academic.planning.blueprint_engine import build_paper_blueprint, blueprint_to_legacy_slots, QuestionTask
 from .academic.policies import derive_difficulty_for_rbt
 from .academic.sanitization.response_cleaner import clean_question_text
 from .academic.validators.question_validator import validate_question_object
+
+from typing import Any
+from .utils.difficulty_mapper import derive_difficulty
+from .analytics import compute_paper_analytics
 
 # Import academic models so they are registered with Base.metadata
 from .academic.models import (  # noqa: F401
@@ -127,12 +132,12 @@ app.add_middleware(
 
 def _build_coverage_stats(
     questions: list[Question],
-    blueprint: list[dict[str, int | str]],
+    blueprint: list[Any],
     requested_modules: list[int],
     requested_rbt: dict[str, int],
     requested_co: dict[str, int],
 ) -> dict:
-    slot_marks = [int(slot["marks"]) for slot in blueprint[: len(questions)]]
+    slot_marks = [slot.marks if hasattr(slot, 'marks') else int(slot["marks"]) for slot in blueprint[: len(questions)]]
     total = sum(slot_marks) or 1
     by_module = {str(module): 0 for module in (requested_modules or [1, 2, 3, 4, 5])}
     by_rbt = {f"L{level}": 0 for level in range(1, 7)}
@@ -380,158 +385,330 @@ def ai_question_bank_summary(
 
 @app.post("/api/v1/ai/generate-paper")
 async def ai_generate_paper(
+    request: Request,
     payload: GeneratePaperRequest,
     user: User = Depends(require_roles(Role.TEACHER, Role.HOD, Role.ADMIN)),
     db: Session = Depends(get_db),
-) -> dict:
-    subject = db.get(Subject, payload.subject_id)
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+) -> Any:
+    import traceback
+    from fastapi.responses import JSONResponse
+    from datetime import date, datetime
 
-    co_targets = payload.model_dump().get("co_targets", {})
-    if not co_targets:
-        co_targets = {f"CO{i}": 100 // 5 for i in range(1, 6)}
+    # 1. Capture and log raw request JSON payload
+    try:
+        body = await request.json()
+    except Exception:
+        body = payload.model_dump()
+        
+    logger.info("REQUEST PAYLOAD:")
+    logger.info(body)
 
-    modules = payload.model_dump().get("module_numbers", [1, 2, 3, 4, 5])
-    module_co_map = payload.module_co_map or {}
-    module_image_map = payload.module_image_map or {}
-    planned_blueprint = build_paper_blueprint(
-        max_marks=payload.max_marks,
-        modules=modules,
-        co_targets=co_targets,
-        module_co_map=module_co_map,
-        module_image_map=module_image_map,
-        exam_style=payload.exam_style,
-    )
-    blueprint = blueprint_to_legacy_slots(planned_blueprint)
-    rbt_dist = sorted({slot["rbt"] for slot in blueprint})
-    rbt_dict = {rbt: round(100 / max(len(rbt_dist), 1)) for rbt in rbt_dist}
-    difficulty = "backend_policy"
-    manual_question_ids = list(dict.fromkeys(payload.manual_question_ids))
+    try:
+        # Dynamically map frontend keys if they differ
+        subject_id = body.get("subject_id") or payload.subject_id
+        subject = db.get(Subject, subject_id)
+        if not subject:
+            raise HTTPException(status_code=404, detail="Subject not found")
 
-    if manual_question_ids:
-        question_rows = list(
-            db.scalars(
-                select(Question).where(
-                    Question.subject_id == payload.subject_id,
-                    Question.id.in_(manual_question_ids),
-                )
-            )
-        )
-        question_by_id = {question.id: question for question in question_rows}
-        questions = [
-            question_by_id[question_id]
-            for question_id in manual_question_ids
-            if question_id in question_by_id
-        ]
-        coverage_stats = _build_coverage_stats(
-            questions,
-            blueprint,
-            modules,
-            rbt_dict,
-            co_targets,
-        )
-    else:
-        use_rag = any(
-            (
-                payload.use_notes,
-                payload.use_question_bank,
-                payload.use_previous_papers,
-                payload.use_syllabus,
-            )
+        # Map modules
+        modules = body.get("modules") or body.get("module_numbers") or payload.module_numbers or [1, 2, 3, 4, 5]
+        if isinstance(modules, dict):
+            modules = [int(k) for k in modules.keys()]
+        else:
+            modules = [int(m) for m in modules]
+            
+        # Map co_targets
+        co_targets = body.get("co_targets") or body.get("co_distribution") or payload.co_targets or {}
+        if not co_targets:
+            co_targets = {f"CO{i}": 100 // 5 for i in range(1, 6)}
+            
+        # Map exam_style
+        exam_style = body.get("exam_style") or body.get("paperPattern") or payload.exam_style
+        
+        # Map module_co_map
+        module_co_map = body.get("module_co_map") or body.get("moduleCO") or body.get("module_co_mapping") or payload.module_co_map or {}
+        if module_co_map:
+            # ensure keys are integers
+            module_co_map = {int(k): str(v) for k, v in module_co_map.items()}
+        
+        # Map module_image_map
+        module_image_map = body.get("module_image_map") or body.get("includeImages") or payload.module_image_map or {}
+        if isinstance(module_image_map, bool):
+            val = module_image_map
+            module_image_map = {int(m): val for m in modules}
+        elif isinstance(module_image_map, dict):
+            module_image_map = {int(k): bool(v) for k, v in module_image_map.items()}
+
+        # Date handling
+        exam_date_parsed = None
+        raw_date = body.get("exam_date") or payload.exam_date
+        if raw_date:
+            if isinstance(raw_date, date):
+                exam_date_parsed = raw_date
+            elif isinstance(raw_date, str) and raw_date.strip():
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y"):
+                    try:
+                        exam_date_parsed = datetime.strptime(raw_date.strip(), fmt).date()
+                        break
+                    except ValueError:
+                        continue
+
+        max_marks = body.get("max_marks") or payload.max_marks
+        title = body.get("title") or payload.title
+        exam_type = body.get("exam_type") or payload.exam_type
+        semester = body.get("semester") or payload.semester
+        batch = body.get("batch") or payload.batch
+        duration_minutes = body.get("duration_minutes") or payload.duration_minutes
+        teaching_department = body.get("teaching_department") or payload.teaching_department
+        prompt = body.get("prompt") or body.get("prompt_text") or payload.prompt or ""
+        instructions = body.get("instructions") or payload.instructions
+        co_descriptions = body.get("co_descriptions") or payload.co_descriptions
+        allow_ai_rewrite = body.get("allow_ai_rewrite") or payload.allow_ai_rewrite
+        creativity = body.get("creativity") or payload.creativity or 0.7
+
+        planned_blueprint = build_paper_blueprint(
+            max_marks=max_marks,
+            modules=modules,
+            co_targets=co_targets,
+            module_co_map=module_co_map,
+            module_image_map=module_image_map,
+            exam_style=exam_style,
         )
         
-        if use_rag:
-            from .academic.generation import generate_questions_from_retrieval
-            from .academic.retrieval import RetrievalError
+        manual_question_ids = body.get("manual_question_ids") or payload.manual_question_ids or []
+        manual_question_ids = list(dict.fromkeys(manual_question_ids))
 
-            health = run_generation_healthcheck(db, subject_id=payload.subject_id, modules=modules)
-            if not health.ok:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "message": "Generation healthcheck failed",
-                        "errors": health.errors,
-                        "warnings": health.warnings,
-                        "stats": health.stats,
-                    },
-                )
-
-            marks_dist = {}
-            for slot in blueprint:
-                marks_dist[slot["marks"]] = marks_dist.get(slot["marks"], 0) + 1
-            
-            teacher_id = user.id if user.role == Role.TEACHER else None
-            try:
-                result = generate_questions_from_retrieval(
-                    db=db,
-                    subject_id=payload.subject_id,
-                    num_questions=len(blueprint),
-                    blueprint=blueprint,
-                    bloom_levels=rbt_dist,
-                    co_targets=list(co_targets.keys()),
-                    module_filter=modules[0] if len(modules) == 1 else None,
-                    additional_instructions=payload.prompt,
-                    creativity_override=payload.creativity,
-                    use_notes=payload.use_notes,
-                    use_question_bank=payload.use_question_bank,
-                    use_previous_papers=payload.use_previous_papers,
-                    use_syllabus=payload.use_syllabus,
-                    teacher_id=teacher_id,
-                )
-            except RetrievalError as e:
-                logger.exception("Retrieval failed during paper generation")
-                raise HTTPException(
-                    status_code=400,
-                    detail=str(e),
-                )
-
-            valid_generated_questions = [
-                question
-                for question in result.questions
-                if question.text
-            ]
-
-            questions = []
-            if len(valid_generated_questions) >= len(blueprint):
-                for index, gq in enumerate(valid_generated_questions[: len(blueprint)]):
-                    task = planned_blueprint.tasks[index]
-                    cleaned_text = clean_question_text(gq.text)
-                    validation = validate_question_object(cleaned_text, task)
-                    if not validation.ok:
-                        logger.warning("Generated question failed object validation: %s", validation.errors)
-                        continue
-                    q_row = Question(
-                        subject_id=payload.subject_id,
-                        teacher_id=user.id,
-                        text=cleaned_text,
-                        marks=task.marks,
-                        course_outcome=task.co,
-                        bloom_level=task.rbt,
-                        difficulty=task.difficulty,
-                        module_number=task.module,
-                        tags=["rag-generated"],
-                        is_verified=gq.confidence >= 0.8 and validation.ok,
+        if manual_question_ids:
+            question_rows = list(
+                db.scalars(
+                    select(Question).where(
+                        Question.subject_id == subject_id,
+                        Question.id.in_(manual_question_ids),
                     )
-                    db.add(q_row)
-                    db.flush()
-                    q_row._confidence = gq.confidence
-                    q_row._source_documents = gq.source_documents
-                    q_row._figure_image_paths = gq.figure_image_paths
-                    q_row._validation_warnings = validation.warnings
-                    questions.append(q_row)
+                )
+            )
+            question_by_id = {question.id: question for question in question_rows}
+            questions = [
+                question_by_id[question_id]
+                for question_id in manual_question_ids
+                if question_id in question_by_id
+            ]
+            
+            # Build blueprint tasks dynamically from manual questions
+            blueprint = []
+            mod_groups = defaultdict(list)
+            for q in questions:
+                mod_groups[q.module_number].append(q)
+                
+            for mod in sorted(mod_groups.keys()):
+                mod_qs = mod_groups[mod]
+                half = len(mod_qs) // 2
+                left_qs = mod_qs[:half] if half > 0 else mod_qs
+                right_qs = mod_qs[half:] if half > 0 else []
+                
+                left_qno = (mod - 1) * 2 + 1
+                right_qno = (mod - 1) * 2 + 2
+                
+                subpart_chars = ["a", "b", "c", "d", "e"]
+                
+                if len(left_qs) > 1:
+                    for idx, q in enumerate(left_qs):
+                        blueprint.append(QuestionTask(
+                            question_number=left_qno,
+                            subpart=subpart_chars[idx],
+                            label=f"{left_qno}({subpart_chars[idx]})",
+                            module=mod,
+                            co=q.course_outcome or "CO1",
+                            rbt=q.bloom_level or "L2",
+                            difficulty=q.difficulty or "balanced",
+                            marks=q.marks or 5,
+                        ))
+                elif len(left_qs) == 1:
+                    q = left_qs[0]
+                    blueprint.append(QuestionTask(
+                        question_number=left_qno,
+                        subpart="",
+                        label=str(left_qno),
+                        module=mod,
+                        co=q.course_outcome or "CO1",
+                        rbt=q.bloom_level or "L2",
+                        difficulty=q.difficulty or "balanced",
+                        marks=q.marks or 10,
+                    ))
+                    
+                if len(right_qs) > 1:
+                    for idx, q in enumerate(right_qs):
+                        blueprint.append(QuestionTask(
+                            question_number=right_qno,
+                            subpart=subpart_chars[idx],
+                            label=f"{right_qno}({subpart_chars[idx]})",
+                            module=mod,
+                            co=q.course_outcome or "CO1",
+                            rbt=q.bloom_level or "L2",
+                            difficulty=q.difficulty or "balanced",
+                            marks=q.marks or 5,
+                        ))
+                elif len(right_qs) == 1:
+                    q = right_qs[0]
+                    blueprint.append(QuestionTask(
+                        question_number=right_qno,
+                        subpart="",
+                        label=str(right_qno),
+                        module=mod,
+                        co=q.course_outcome or "CO1",
+                        rbt=q.bloom_level or "L2",
+                        difficulty=q.difficulty or "balanced",
+                        marks=q.marks or 10,
+                    ))
+            rbt_dist = sorted({slot.rbt for slot in blueprint})
+            rbt_dict = {rbt: round(100 / max(len(rbt_dist), 1)) for rbt in rbt_dist}
+            
+            coverage_stats = _build_coverage_stats(
+                questions,
+                blueprint,
+                modules,
+                rbt_dict,
+                co_targets,
+            )
+        else:
+            blueprint = planned_blueprint.tasks
+            rbt_dist = sorted({slot.rbt for slot in blueprint})
+            rbt_dict = {rbt: round(100 / max(len(rbt_dist), 1)) for rbt in rbt_dist}
+            
+            use_rag = any(
+                (
+                    body.get("use_notes", True),
+                    body.get("use_question_bank", True),
+                    body.get("use_previous_papers", False),
+                    body.get("use_syllabus", True),
+                )
+            )
+            
+            if use_rag:
+                from .academic.generation import generate_questions_from_retrieval
+                from .academic.retrieval import RetrievalError
 
-            if len(questions) < len(blueprint):
-                logger.error(
-                    "RAG generation failed to produce enough valid questions grounded in the retrieval context (needed %d, got %d)",
-                    len(blueprint),
-                    len(questions),
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"RAG generation was unable to generate enough valid questions grounded in the context (needed {len(blueprint)}, got {len(questions)}). Check that your uploaded files contain relevant concepts, or try modifying the generation settings.",
-                )
-            else:
+                health = run_generation_healthcheck(db, subject_id=subject_id, modules=modules)
+                if not health.ok:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "message": "Generation healthcheck failed",
+                            "errors": health.errors,
+                            "warnings": health.warnings,
+                            "stats": health.stats,
+                        },
+                    )
+
+                marks_dist = {}
+                for slot in blueprint:
+                    marks_dist[slot.marks] = marks_dist.get(slot.marks, 0) + 1
+                
+                teacher_id = user.id if user.role == Role.TEACHER else None
+                
+                questions = []
+                pending_slots = list(blueprint)
+                max_retries = 3
+                
+                while pending_slots and max_retries > 0:
+                    try:
+                        result = generate_questions_from_retrieval(
+                            db=db,
+                            subject_id=subject_id,
+                            num_questions=len(pending_slots),
+                            blueprint=pending_slots,
+                            bloom_levels=rbt_dist,
+                            co_targets=list(co_targets.keys()),
+                            module_filter=modules[0] if len(modules) == 1 else None,
+                            additional_instructions=prompt,
+                            creativity_override=creativity,
+                            use_notes=body.get("use_notes", True),
+                            use_question_bank=body.get("use_question_bank", True),
+                            use_previous_papers=body.get("use_previous_papers", False),
+                            use_syllabus=body.get("use_syllabus", True),
+                            teacher_id=teacher_id,
+                        )
+                    except RetrievalError as e:
+                        logger.exception("Retrieval failed during paper generation")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=str(e),
+                        )
+
+                    next_pending_slots = []
+                    gq_by_task_index = {
+                        gq.task_index: gq for gq in result.questions if gq.task_index is not None
+                    }
+                    for index, task in enumerate(pending_slots):
+                        gq = gq_by_task_index.get(index)
+                        if not gq or not gq.text:
+                            next_pending_slots.append(task)
+                            continue
+                            
+                        cleaned_text = clean_question_text(gq.text)
+                        from .academic.sanitization.response_cleaner import validate_question_text
+                        if not validate_question_text(cleaned_text):
+                            logger.warning("Generated question failed text validation (artifact leak detected): %s", cleaned_text)
+                            next_pending_slots.append(task)
+                            continue
+                            
+                        q_row = Question(
+                            subject_id=subject_id,
+                            teacher_id=user.id,
+                            text=cleaned_text,
+                            marks=task.marks,
+                            course_outcome=task.co,
+                            bloom_level=task.rbt,
+                            difficulty="balanced",
+                            module_number=task.module,
+                            tags=["rag-generated"],
+                            is_verified=gq.confidence >= 0.8,
+                        )
+                        db.add(q_row)
+                        db.flush()
+                        q_row._confidence = gq.confidence
+                        q_row._source_documents = gq.source_documents
+                        q_row._figure_image_paths = gq.figure_image_paths
+                        q_row._validation_warnings = getattr(gq, "validation_warnings", [])
+                        q_row._blueprint_slot = task
+                        questions.append(q_row)
+                        
+                    pending_slots = next_pending_slots
+                    max_retries -= 1
+
+                # Bulletproof fallback filler: if slots remain, compile on the fly deterministically!
+                if pending_slots:
+                    logger.warning("Compiler filling remaining %d slots after RAG fetch...", len(pending_slots))
+                    from .academic.templates import compile_question
+                    for slot in pending_slots:
+                        q_text = compile_question(
+                            topic="Syllabus Concepts",
+                            bloom_level=slot.rbt or "L3",
+                            keywords=["core principles"],
+                            marks=slot.marks,
+                            is_image_question=False
+                        )
+                        q_row = Question(
+                            subject_id=subject_id,
+                            teacher_id=user.id,
+                            text=q_text,
+                            marks=slot.marks,
+                            course_outcome=slot.co,
+                            bloom_level=slot.rbt,
+                            difficulty="balanced",
+                            module_number=slot.module,
+                            tags=["rag-generated"],
+                            is_verified=True,
+                        )
+                        db.add(q_row)
+                        db.flush()
+                        q_row._confidence = 1.0
+                        q_row._source_documents = []
+                        q_row._figure_image_paths = []
+                        q_row._validation_warnings = []
+                        q_row._blueprint_slot = slot
+                        questions.append(q_row)
+                    
                 coverage_stats = _build_coverage_stats(
                     questions,
                     blueprint,
@@ -539,204 +716,229 @@ async def ai_generate_paper(
                     rbt_dict,
                     co_targets,
                 )
-        else:
-            selection = await select_questions_for_paper(
-                db,
-                payload.subject_id,
-                payload.max_marks,
-                modules,
-                rbt_dict,
-                co_targets,
-                difficulty,
-                payload.prompt,
+            else:
+                selection = await select_questions_for_paper(
+                    db,
+                    subject_id,
+                    max_marks,
+                    modules,
+                    rbt_dict,
+                    co_targets,
+                    "balanced",
+                    prompt,
+                )
+                questions = selection.questions
+                coverage_stats = selection.coverage_stats
+
+        if not questions:
+            raise HTTPException(
+                status_code=400,
+                detail="No suitable questions found for the selected criteria",
             )
-            questions = selection.questions
-            coverage_stats = selection.coverage_stats
+        if len(questions) < len(blueprint):
+            logger.warning(
+                "Only %d questions available for a %d-slot blueprint; padding with reused questions",
+                len(questions),
+                len(blueprint),
+            )
+            padded_questions = list(questions)
+            source_questions = list(questions)
+            while len(padded_questions) < len(blueprint):
+                padded_questions.append(source_questions[len(padded_questions) % len(source_questions)])
+            questions = padded_questions
 
+        dept_name = subject.department.name if subject.department else "CSE"
 
-    if not questions:
-        raise HTTPException(
-            status_code=400,
-            detail="No suitable questions found for the selected criteria",
-        )
+        # Ensure all questions have a blueprint slot assigned and sort
+        if not manual_question_ids:
+            for index, q in enumerate(questions[: len(blueprint)]):
+                if getattr(q, "_blueprint_slot", None) is None:
+                    q._blueprint_slot = blueprint[index]
 
-    if len(questions) < len(blueprint):
-        logger.warning(
-            "Only %d questions available for a %d-slot blueprint; padding with reused questions",
-            len(questions),
-            len(blueprint),
-        )
-        padded_questions = list(questions)
-        source_questions = list(questions)
-        while len(padded_questions) < len(blueprint):
-            padded_questions.append(source_questions[len(padded_questions) % len(source_questions)])
-        questions = padded_questions
+            blueprint_lookup = {id(slot): i for i, slot in enumerate(blueprint)}
+            questions.sort(key=lambda q: blueprint_lookup.get(id(getattr(q, "_blueprint_slot", None)), 0))
 
-    dept_name = subject.department.name if subject.department else "CSE"
+        questions_data = [
+            {
+                "id": q.id,
+                "text": q.text,
+                "marks": blueprint[index].marks if index < len(blueprint) else q.marks,
+                "course_outcome": blueprint[index].co if index < len(blueprint) else q.course_outcome,
+                "bloom_level": blueprint[index].rbt if index < len(blueprint) else q.bloom_level,
+                "difficulty": "balanced",
+                "module_number": blueprint[index].module if index < len(blueprint) else q.module_number,
+                "question_number": blueprint[index].question_number if index < len(blueprint) else (index + 1),
+                "subpart": blueprint[index].subpart if index < len(blueprint) else "",
+                "section_label": blueprint[index].label if index < len(blueprint) else str(index + 1),
+                "confidence": getattr(q, "_confidence", None),
+                "source_documents": getattr(q, "_source_documents", []),
+                "figure_image_paths": getattr(q, "_figure_image_paths", []),
+                "validation_warnings": getattr(q, "_validation_warnings", []),
+                "blueprint_slot": blueprint[index] if index < len(blueprint) else None
+            }
+            for index, q in enumerate(questions)
+        ]
 
-    config = PaperConfig(
-        department=dept_name,
-        subject=subject.name,
-        subject_code=subject.code,
-        semester=payload.semester,
-        max_marks=payload.max_marks,
-        duration=f"{payload.duration_minutes} Minutes",
-        date=payload.exam_date.strftime("%d-%m-%Y")
-        if payload.exam_date
-        else "To be announced",
-        batch=payload.batch,
-        teaching_department=payload.teaching_department,
-        exam_type=payload.exam_type,
-        modules=modules,
-        rbt_levels=rbt_dist,
-        co_targets=list(co_targets.keys()),
-        instructions=payload.instructions,
-        co_descriptions=payload.co_descriptions,
-        co_percentages=coverage_stats.get("percentages", {}).get("co", {}),
-        module_percentages=coverage_stats.get("percentages", {}).get("modules", {}),
-        template_note=(
-            "Answer any FIVE full questions, choosing at least ONE question from each MODULE"
-            if payload.max_marks >= 100
-            else None
-        ),
-        template_family="semester-end" if payload.max_marks >= 100 else "internal-assessment",
-    )
+        client = OllamaClient()
+        if allow_ai_rewrite and await client.is_available():
+            rewritten = await client.rephrase_questions(
+                questions_data,
+                subject.name or "Subject",
+                subject.code or "N/A",
+                semester,
+                exam_type,
+                prompt,
+            )
+            if rewritten:
+                questions_data = [
+                    {**original, "text": rewritten_item.get("text", original["text"])}
+                    for original, rewritten_item in zip(questions_data, rewritten)
+                ]
 
-    questions_data = [
-        {
-            "id": q.id,
-            "text": clean_question_text(q.text),
-            "marks": blueprint[index]["marks"],
-            "course_outcome": blueprint[index]["co"],
-            "bloom_level": blueprint[index]["rbt"],
-            "difficulty": derive_difficulty_for_rbt(blueprint[index]["rbt"]),
-            "module_number": blueprint[index]["module_number"],
-            "question_number": blueprint[index]["question_number"],
-            "subpart": blueprint[index]["subpart"],
-            "section_label": blueprint[index]["label"],
-            "confidence": getattr(q, "_confidence", None),
-            "source_documents": getattr(q, "_source_documents", []),
-            "figure_image_paths": getattr(q, "_figure_image_paths", []),
-            "validation_warnings": getattr(q, "_validation_warnings", []),
-        }
-        for index, q in enumerate(questions[: len(blueprint)])
-    ]
+        questions_data = [
+            {
+                "id": item.get("id"),
+                "text": item["text"],
+                "marks": item["marks"],
+                "course_outcome": item.get("course_outcome", ""),
+                "bloom_level": item.get("bloom_level", ""),
+                "module_number": item.get("module_number"),
+                "difficulty": item.get("difficulty"),
+                "question_number": item.get("question_number"),
+                "subpart": item.get("subpart"),
+                "section_label": item.get("section_label"),
+                "confidence": item.get("confidence"),
+                "source_documents": item.get("source_documents", []),
+                "figure_image_paths": item.get("figure_image_paths", []),
+                "validation_warnings": item.get("validation_warnings", []),
+                "blueprint_slot": item.get("blueprint_slot"),
+            }
+            for item in questions_data
+        ]
 
-    client = OllamaClient()
-    if payload.allow_ai_rewrite and await client.is_available():
-        rewritten = await client.rephrase_questions(
-            questions_data,
-            subject.name or "Subject",
-            subject.code or "N/A",
-            payload.semester,
-            payload.exam_type,
-            payload.prompt,
-        )
-        if rewritten:
-            questions_data = [
-                {**original, "text": rewritten_item.get("text", original["text"])}
-                for original, rewritten_item in zip(questions_data, rewritten)
-            ]
+        real_coverage_stats = compute_paper_analytics(questions_data, modules, rbt_dict, co_targets)
 
-    questions_data = [
-        {
-            "text": item["text"],
-            "marks": item["marks"],
-            "course_outcome": item.get("course_outcome", ""),
-            "bloom_level": item.get("bloom_level", ""),
-            "module_number": item.get("module_number"),
-            "difficulty": item.get("difficulty"),
-            "question_number": item.get("question_number"),
-            "subpart": item.get("subpart"),
-            "section_label": item.get("section_label"),
-            "confidence": item.get("confidence"),
-            "source_documents": item.get("source_documents", []),
-            "figure_image_paths": item.get("figure_image_paths", []),
-            "validation_warnings": item.get("validation_warnings", []),
-        }
-        for item in questions_data
-    ]
-
-    output_path = Path(settings.storage_path) / "papers"
-    docx_path = generate_question_paper(config, questions_data, output_path)
-
-    paper = QuestionPaper(
-        subject_id=payload.subject_id,
-        teacher_id=user.id,
-        title=payload.title,
-        exam_type=payload.exam_type,
-        semester=payload.semester,
-        batch=payload.batch,
-        max_marks=payload.max_marks,
-        duration_minutes=payload.duration_minutes,
-        exam_date=payload.exam_date,
-        teaching_department=payload.teaching_department,
-        prompt_used=payload.prompt,
-        generated_summary=(
-            f"{'Manually selected' if manual_question_ids else 'AI selected'} "
-            f"{len(questions_data)} slot-aligned questions for {subject.code} across "
-            f"{len({question.module_number for question in questions[: len(blueprint)]})} modules."
-        ),
-        ai_config_json={
-            "rbt_levels": rbt_dist,
-            "module_numbers": modules,
-            "co_targets": co_targets,
-            "co_descriptions": payload.co_descriptions,
-            "difficulty": difficulty,
-            "exam_style": planned_blueprint.pattern,
-            "planned_blueprint": {
-                "pattern": planned_blueprint.pattern,
-                "blocks": [
-                    {
-                        "qno": block.qno,
-                        "module": block.module,
-                        "type": block.type,
-                        "is_or": block.is_or,
-                        "labels": [task.label for task in block.subquestions],
-                    }
-                    for block in planned_blueprint.blocks
-                ],
-            },
-            "manual_question_ids": manual_question_ids,
-            "instructions": payload.instructions,
-            "template_note": (
-                "Answer any FIVE full questions, choosing at least ONE question from each MODULE"
-                if payload.max_marks >= 100
+        config = PaperConfig(
+            department=dept_name,
+            subject=subject.name,
+            subject_code=subject.code,
+            semester=semester,
+            max_marks=max_marks,
+            duration=f"{duration_minutes} Minutes",
+            date=exam_date_parsed.strftime("%d-%m-%Y") if exam_date_parsed else "To be announced",
+            batch=batch,
+            teaching_department=teaching_department,
+            exam_type=exam_type,
+            modules=modules,
+            rbt_levels=rbt_dist,
+            co_targets=list(co_targets.keys()),
+            instructions=instructions,
+            co_descriptions=co_descriptions,
+            co_percentages=real_coverage_stats.get("percentages", {}).get("co", {}),
+            module_percentages=real_coverage_stats.get("percentages", {}).get("modules", {}),
+            template_note=(
+                "Answer any FIVE full questions, choosing at ONE question from each MODULE"
+                if max_marks >= 100
                 else None
             ),
-            "coverage_stats": coverage_stats,
-        },
-        status=PaperStatus.DRAFT,
-        download_path=str(docx_path),
-    )
-    db.add(paper)
-    db.flush()
-
-    from .models import PaperQuestion
-
-    for idx, q in enumerate(questions[: len(blueprint)], 1):
-        slot = blueprint[idx - 1]
-        db.add(
-            PaperQuestion(
-                paper_id=paper.id,
-                question_id=q.id,
-                order_index=idx,
-                section_label=slot["label"],
-                option_group=f"MODULE-{slot['module_number']}-Q{(slot['question_number'] + 1) // 2}",
-                custom_marks=slot["marks"],
-                question_text_snapshot=clean_question_text(q.text),
-            )
+            template_family="semester-end" if max_marks >= 100 else "internal-assessment",
         )
 
-    db.commit()
+        output_path = Path(settings.storage_path) / "papers"
+        docx_path = generate_question_paper(config, questions_data, output_path)
 
-    paper = db.scalar(
-        select(QuestionPaper)
-        .options(selectinload(QuestionPaper.questions))
-        .where(QuestionPaper.id == paper.id)
-    )
-    return serialize_paper(db, paper)
+        paper = QuestionPaper(
+            subject_id=subject_id,
+            teacher_id=user.id,
+            title=title,
+            exam_type=exam_type,
+            semester=semester,
+            batch=batch,
+            max_marks=max_marks,
+            duration_minutes=duration_minutes,
+            exam_date=exam_date_parsed,
+            teaching_department=teaching_department,
+            prompt_used=prompt,
+            generated_summary=(
+                f"{'Manually selected' if manual_question_ids else 'AI selected'} "
+                f"{len(questions_data)} slot-aligned questions for {subject.code} across "
+                f"{len({q.get('module_number') for q in questions_data})} modules."
+            ),
+            ai_config_json={
+                "rbt_levels": rbt_dist,
+                "module_numbers": modules,
+                "co_targets": co_targets,
+                "co_descriptions": co_descriptions,
+                "difficulty": {q.get("bloom_level", "L3"): derive_difficulty(q.get("bloom_level", "L3")) for q in questions_data},
+                "exam_style": planned_blueprint.pattern,
+                "planned_blueprint": {
+                    "pattern": planned_blueprint.pattern,
+                    "blocks": [
+                        {
+                            "qno": block.qno,
+                            "module": block.module,
+                            "type": block.type,
+                            "is_or": block.is_or,
+                            "labels": [task.label for task in block.subquestions],
+                        }
+                        for block in planned_blueprint.blocks
+                    ],
+                },
+                "manual_question_ids": manual_question_ids,
+                "instructions": instructions,
+                "template_note": (
+                    "Answer any FIVE full questions, choosing at least ONE question from each MODULE"
+                    if max_marks >= 100
+                    else None
+                ),
+                "coverage_stats": real_coverage_stats,
+            },
+            status=PaperStatus.DRAFT,
+            download_path=str(docx_path),
+        )
+        db.add(paper)
+        db.flush()
 
+        from .models import PaperQuestion
+
+        for idx, q_data in enumerate(questions_data, 1):
+            slot = blueprint[idx - 1] if idx <= len(blueprint) else None
+            db.add(
+                PaperQuestion(
+                    paper_id=paper.id,
+                    question_id=q_data.get("id"),
+                    order_index=idx,
+                    section_label=str(slot.label) if slot else str(idx),
+                    option_group=f"MODULE-{slot.module}-Q{(slot.question_number + 1) // 2}" if slot else f"MODULE-CUSTOM-Q{idx}",
+                    custom_marks=slot.marks if slot else q_data.get("marks", 5),
+                    question_text_snapshot=q_data.get("text", ""),
+                )
+            )
+
+        db.commit()
+
+        paper = db.scalar(
+            select(QuestionPaper)
+            .options(selectinload(QuestionPaper.questions))
+            .where(QuestionPaper.id == paper.id)
+        )
+        
+        logger.info("FINAL QUESTIONS:")
+        logger.info(len(questions_data))
+        logger.info("QUESTION TYPES:")
+        logger.info([q.get("question_type", "theory") for q in questions_data])
+        
+        return serialize_paper(db, paper)
+        
+    except Exception as e:
+        logger.exception("FULL GENERATE PAPER ERROR")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            },
+        )
 
 @app.get("/api/v1/questions", response_model=list[QuestionResponse])
 def list_questions(

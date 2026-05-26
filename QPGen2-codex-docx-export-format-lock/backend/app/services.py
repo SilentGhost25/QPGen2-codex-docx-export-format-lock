@@ -707,8 +707,8 @@ def generate_paper(db: Session, user: User, payload: dict[str, Any]) -> Question
                 paper_id=paper.id,
                 question_id=question.id,
                 order_index=index,
-                section_label=slot["label"] if slot else str(index),
-                custom_marks=slot["marks"] if slot else question.marks,
+                section_label=slot.label if slot else str(index),
+                custom_marks=slot.marks if slot else question.marks,
                 question_text_snapshot=question.text,
             )
         )
@@ -1075,6 +1075,20 @@ def export_paper_docx(db: Session, user: User, paper: QuestionPaper) -> Path:
             cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
             text = cleaned_text
 
+        # Parse question_number and subpart from section_label
+        sec_label = question.get("section_label") or ""
+        qno = 1
+        subpart = ""
+        match_part = re.match(r"^(\d+)\((.+?)\)$", sec_label.strip())
+        if match_part:
+            qno = int(match_part.group(1))
+            subpart = match_part.group(2)
+        else:
+            match_dig = re.match(r"^(\d+)$", sec_label.strip())
+            if match_dig:
+                qno = int(match_dig.group(1))
+                subpart = ""
+
         docx_questions.append({
             "text": text,
             "marks": question["custom_marks"] or marks_per_slot,
@@ -1083,6 +1097,8 @@ def export_paper_docx(db: Session, user: User, paper: QuestionPaper) -> Path:
             "module_number": question.get("module_number"),
             "section_label": question.get("section_label"),
             "figure_image_paths": resolved_paths,
+            "question_number": qno,
+            "subpart": subpart,
         })
 
     file_path = generate_question_paper(config, docx_questions, export_dir)

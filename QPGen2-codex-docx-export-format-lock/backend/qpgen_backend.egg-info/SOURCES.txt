@@ -2,10 +2,10 @@ README.md
 pyproject.toml
 app/__init__.py
 app/ai_service.py
+app/analytics.py
 app/auth.py
 app/config.py
 app/database.py
-app/generator.py
 app/llm_pipeline.py
 app/main.py
 app/models.py

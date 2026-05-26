@@ -223,6 +223,59 @@ def delete_academic_document(
     return {"deleted": True, "document_id": document_id}
 
 
+@router.post("/reindex", status_code=200)
+def reindex_all_documents(
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_roles(Role.HOD, Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Force full reindexing of all academic documents:
+    Delete old chunks, rechunk, re-generate embeddings, and auto-approve chunks.
+    Runs asynchronously in the background.
+    """
+    # 1. Fetch all documents
+    docs = list(db.scalars(select(AcademicDocument)))
+    if not docs:
+        return {"message": "No documents found to reindex"}
+        
+    doc_ids = [d.id for d in docs]
+    
+    def run_reindex_bg():
+        from ..database import SessionLocal
+        from .ingestion import process_document_background
+        from sqlalchemy import delete
+        from ..models import Question
+        
+        bg_db = SessionLocal()
+        try:
+            for doc_id in doc_ids:
+                logger.info(f"Background task starting reindexing for document_id={doc_id}")
+                try:
+                    # Clean up existing chunks and questions related to this document
+                    bg_db.execute(
+                        delete(KnowledgeChunk).where(KnowledgeChunk.document_id == doc_id)
+                    )
+                    bg_db.execute(
+                        delete(Question).where(Question.source_doc_id == doc_id)
+                    )
+                    bg_db.commit()
+                    
+                    # The ingestion pipeline automatically recreates everything with auto-approval
+                    process_document_background(doc_id)
+                except Exception as ex:
+                    logger.error(f"Failed to reindex document_id={doc_id}: {ex}")
+        finally:
+            bg_db.close()
+            
+    background_tasks.add_task(run_reindex_bg)
+    return {
+        "message": f"Successfully queued reindexing for {len(doc_ids)} documents",
+        "document_ids": doc_ids,
+    }
+
+
+
 @router.get("/documents/{document_id}/structured", response_model=StructuredContentResponse)
 def get_structured_content(
     document_id: int,
@@ -331,6 +384,7 @@ def search_knowledge_chunks(
             ChunkApprovalStatus.AUTO_APPROVED,
             ChunkApprovalStatus.APPROVED,
             ChunkApprovalStatus.EDITED,
+            ChunkApprovalStatus.PENDING_REVIEW,
         ])
     )
 
@@ -633,6 +687,7 @@ def generate_questions_rag(
                 ChunkApprovalStatus.AUTO_APPROVED,
                 ChunkApprovalStatus.APPROVED,
                 ChunkApprovalStatus.EDITED,
+                ChunkApprovalStatus.PENDING_REVIEW,
             ]),
         )
     ) or 0

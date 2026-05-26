@@ -355,6 +355,40 @@ export default function GeneratePaper() {
       return;
     }
     
+    // End-Sem validation: verify no more than one module contains a 3-subpart question in manual mode if applicable (or check blueprint config)
+    if (values.examType === "End-Sem") {
+      // Find modules from manual selection that have 3 subparts, or check if the blueprint is valid
+      // Let's count how many modules have 3 subparts in our selection or target configuration.
+      // Under our end-sem rules, only 1 module should have a 3-subpart question.
+      // We can check manual selection mapping:
+      const threeSubpartsModules = new Set<number>();
+      const moduleSubpartCounts: Record<number, Record<number, Set<string>>> = {}; // module -> questionNumber -> subparts
+      
+      if (!isAutoGenerate) {
+        manualSelectedQuestions.forEach((q) => {
+          const mod = q.module_number;
+          const qno = q.question_number;
+          const sub = q.subpart || "a";
+          if (!moduleSubpartCounts[mod]) moduleSubpartCounts[mod] = {};
+          if (!moduleSubpartCounts[mod][qno]) moduleSubpartCounts[mod][qno] = new Set();
+          moduleSubpartCounts[mod][qno].add(sub);
+        });
+
+        Object.entries(moduleSubpartCounts).forEach(([mod, qnos]) => {
+          Object.values(qnos).forEach((subs) => {
+            if (subs.size >= 3) {
+              threeSubpartsModules.add(parseInt(mod));
+            }
+          });
+        });
+
+        if (threeSubpartsModules.size > 1) {
+          toast.error("Validation Error: Only ONE module can contain a 3-subpart question under End-Sem rules.");
+          return;
+        }
+      }
+    }
+
     generatePaperMutation.mutate({
       subject_id: parseInt(values.subjectId),
       title: `${values.examType} - ${subject?.name || 'Paper'}`,

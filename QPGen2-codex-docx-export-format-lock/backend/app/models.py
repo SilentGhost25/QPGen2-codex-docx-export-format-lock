@@ -113,6 +113,8 @@ class Question(Base):
     module_number: Mapped[int] = mapped_column(Integer)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    embedding_vector: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 

@@ -37,56 +37,6 @@ function normalizeQuestionLabel(label: string | undefined, fallback: string) {
   return match ? formatQuestionLabel(Number(match[1]), match[2].toLowerCase()) : text;
 }
 
-function buildQuestionBlueprint(maxMarks: number) {
-  if (maxMarks <= 50) {
-    const patterns = [
-      ...Array.from({ length: 4 }, () => [5, 5] as const),
-      ...Array.from({ length: 6 }, () => [4, 6] as const),
-    ];
-    return patterns.flatMap(([partA, partB], index) => [
-      {
-        questionNumber: index + 1,
-        subpart: "a",
-        label: formatQuestionLabel(index + 1, "a"),
-        marks: partA,
-        moduleNumber: Math.floor(index / 2) + 1,
-      },
-      {
-        questionNumber: index + 1,
-        subpart: "b",
-        label: formatQuestionLabel(index + 1, "b"),
-        marks: partB,
-        moduleNumber: Math.floor(index / 2) + 1,
-      },
-    ]);
-  }
-
-  const hundredMarkModules = [
-    [1, [[1, "a", 6], [1, "b", 6], [1, "c", 8], [2, "a", 6], [2, "b", 6], [2, "c", 8]]],
-    [2, [[3, "a", 5], [3, "b", 8], [3, "c", 7], [4, "a", 5], [4, "b", 8], [4, "c", 7]]],
-    [3, [[5, "a", 5], [5, "b", 8], [5, "c", 7], [6, "a", 5], [6, "b", 8], [6, "c", 7]]],
-    [4, [[7, "a", 10], [7, "b", 10], [8, "a", 10], [8, "b", 10]]],
-    [5, [[9, "a", 10], [9, "b", 10], [10, "a", 10], [10, "b", 10]]],
-  ] as const;
-
-  return hundredMarkModules.flatMap(([moduleNumber, rows]) =>
-    rows.map(([questionNumber, subpart, marks]) => ({
-      questionNumber,
-      subpart,
-      label: formatQuestionLabel(questionNumber, subpart),
-      marks,
-      moduleNumber,
-    })),
-  );
-}
-
-function buildPercentageMap(
-  values: Record<string, any> | undefined,
-  keys: string[],
-) {
-  return Object.fromEntries(keys.map((key) => [key, values?.[key] ?? 0]));
-}
-
 type PaperRow =
   | { type: "module"; title: string; key: string }
   | { type: "or"; key: string }
@@ -100,40 +50,55 @@ type PaperRow =
       rbtl: string;
     };
 
-function buildPaperRows(
-  maxMarks: number,
-  blueprint: ReturnType<typeof buildQuestionBlueprint>,
-  questions: PaperQuestion[],
-): PaperRow[] {
+function buildPercentageMap(
+  values: Record<string, any> | undefined,
+  keys: string[],
+) {
+  return Object.fromEntries(keys.map((key) => [key, values?.[key] ?? 0]));
+}
+
+function normalizeQuestions(questions: PaperQuestion[], maxMarks: number): PaperRow[] {
   const rows: PaperRow[] = [];
+  let currentModule = -1;
+  let currentBaseQuestion = -1;
 
-  blueprint.forEach((slot, index) => {
-    const question = questions[index];
-    const previousSlot = index > 0 ? blueprint[index - 1] : null;
-
-    if (
-      maxMarks > 50 &&
-      (!previousSlot || previousSlot.moduleNumber !== slot.moduleNumber)
-    ) {
-      rows.push({
-        type: "module",
-        title: `Module - ${slot.moduleNumber}`,
-        key: `module-${slot.moduleNumber}`,
-      });
+  questions.forEach((q, index) => {
+    const label = (q.section_label || "").trim();
+    const match = label.match(/^(\d+)[(]?([a-z])?[)]?$/i);
+    let qNum = -1;
+    let subpart = "";
+    if (match) {
+      qNum = parseInt(match[1]);
+      subpart = match[2]?.toLowerCase() || "";
+    }
+    
+    // Module logic
+    if (qNum > 0 && maxMarks > 50) {
+      const mod = Math.floor((qNum - 1) / 2) + 1;
+      if (mod !== currentModule) {
+        rows.push({ type: "module", title: `Module - ${mod}`, key: `module-${mod}` });
+        currentModule = mod;
+      }
     }
 
-    if (slot.subpart === "a" && slot.questionNumber % 2 === 0) {
-      rows.push({ type: "or", key: `or-${slot.questionNumber}` });
+    // OR logic
+    if (qNum > 0 && qNum % 2 === 0 && qNum !== currentBaseQuestion && subpart === "a") {
+      if (currentBaseQuestion !== -1) {
+        rows.push({ type: "or", key: `or-${qNum}` });
+      }
+    }
+    if (qNum > 0) {
+        currentBaseQuestion = qNum;
     }
 
     rows.push({
       type: "question",
-      key: `question-${slot.label}`,
-      qno: normalizeQuestionLabel(question?.section_label, slot.label),
-      text: question?.text || "",
-      marks: question?.custom_marks ?? slot.marks,
-      co: question?.course_outcome || "",
-      rbtl: question?.bloom_level || "",
+      key: `question-${label || index}-${rows.length}`,
+      qno: normalizeQuestionLabel(label, label),
+      text: q.text || "",
+      marks: q.custom_marks || 0,
+      co: q.course_outcome || "",
+      rbtl: q.bloom_level || "",
     });
   });
 
@@ -209,12 +174,10 @@ export function PaperPreview({
         : ""),
   };
 
-  const blueprint = buildQuestionBlueprint(defaults.maxMarks || 50);
-  const previewQuestions = questions.slice(0, blueprint.length);
-  const paperRows = buildPaperRows(defaults.maxMarks || 50, blueprint, previewQuestions);
+  const paperRows = normalizeQuestions(questions, defaults.maxMarks || 50);
 
   return (
-    <div className="mx-auto w-full max-w-[820px] bg-white px-4 py-4 font-sans text-[11px] text-black">
+    <div className="mx-auto w-full bg-white px-4 py-4 font-sans text-[11px] text-black">
       <div className="flex items-center gap-3 border-b border-black pb-3">
         <img
           src="/dsu-logo.jpg"

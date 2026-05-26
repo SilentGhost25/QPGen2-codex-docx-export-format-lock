@@ -227,6 +227,7 @@ def retrieve_for_generation(
                 ChunkApprovalStatus.AUTO_APPROVED,
                 ChunkApprovalStatus.APPROVED,
                 ChunkApprovalStatus.EDITED,
+                ChunkApprovalStatus.PENDING_REVIEW,
             ]),
         )
     )

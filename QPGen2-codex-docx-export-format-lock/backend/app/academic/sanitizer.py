@@ -43,6 +43,28 @@ ARTIFACT_PATTERNS = [
 ]
 
 
+def sanitize_llm_output(text: str) -> str:
+    """Repairs and sanitizes LLM output containing leaked backend artifacts or JSON brackets."""
+    text = str(text or "").strip()
+    # Remove curly braces and JSON-like/Python-dict prefixes (e.g. {"Question": "foo"} -> "foo")
+    text = re.sub(r"\{.*?:", "", text)
+    text = text.replace("}", "")
+    text = text.replace('"', "")
+    text = text.replace("'", "")
+    
+    # Strip common prefix labels
+    prefixes = [
+        "Question:", "question:", "QUESTION:",
+        "Show:", "show:", "SHOW:",
+        "Explain:", "explain:", "EXPLAIN:"
+    ]
+    for pref in prefixes:
+        if text.startswith(pref):
+            text = text[len(pref):].strip()
+            
+    return text.strip()
+
+
 def sanitize_question_output(text: str) -> str:
     """
     Cleans a question text by stripping out reasoning traces, assessment goals,
@@ -51,7 +73,7 @@ def sanitize_question_output(text: str) -> str:
     if not text:
         return ""
         
-    cleaned = text.strip()
+    cleaned = sanitize_llm_output(text)
     
     # Strip common markdown bold prefix formatting if the model wrapped tags
     # e.g., "**Question:** Explain..." -> "Explain..."

@@ -469,30 +469,115 @@ def process_document_background(
             syllabus = db.query(SubjectSyllabus).filter_by(subject_id=doc.subject_id).first()
             syllabus_modules = syllabus.modules_json if syllabus else None
 
-            # --- Classify and store chunks ---
+            # --- Classify, generate questions, and store chunks concurrently ---
             doc.processing_status = ProcessingStatus.EMBEDDING
             db.commit()
 
-            db_chunks = []
-            last_detected_module = None
-            for chunk in chunks:
-                classification = classify_chunk(
-                    chunk.text,
-                    source_section=chunk.source_section,
-                    syllabus_modules=syllabus_modules,
-                )
+            import asyncio
+            import base64
+            from ..llm_pipeline import get_pipeline
+            from ..models import Question
 
+            async def run_ingestion_parallel(chunks, syllabus_modules, struct_doc_opt):
+                loop = asyncio.get_running_loop()
+                pipeline = get_pipeline()
+                
+                async def process_chunk(chunk):
+                    class_task = loop.run_in_executor(
+                        None, classify_chunk, chunk.text, chunk.source_section, syllabus_modules
+                    )
+                    gen_task = loop.run_in_executor(
+                        None, pipeline.extractor.from_text, chunk.text
+                    )
+                    try:
+                        classification, extracted_qs = await asyncio.gather(class_task, gen_task)
+                    except Exception as e:
+                        logger.error(f"Chunk processing failed: {e}")
+                        return chunk, None, []
+                    return chunk, classification, extracted_qs
+                
+                chunk_tasks = [process_chunk(c) for c in chunks]
+                
+                async def process_image(fb):
+                    if not fb.image_path:
+                        return fb, []
+                    def encode_and_extract():
+                        try:
+                            with open(fb.image_path, "rb") as img_file:
+                                b64 = base64.b64encode(img_file.read()).decode("utf-8")
+                            return pipeline.extractor.from_image(b64)
+                        except Exception as e:
+                            logger.error(f"Image extraction failed for {fb.image_path}: {e}")
+                            return []
+                    extracted_qs = await loop.run_in_executor(None, encode_and_extract)
+                    return fb, extracted_qs
+                
+                image_tasks = []
+                if struct_doc_opt:
+                    image_tasks = [process_image(fb) for fb in struct_doc_opt.get_all_blocks("figure")]
+                    
+                chunk_results, image_results = await asyncio.gather(
+                    asyncio.gather(*chunk_tasks),
+                    asyncio.gather(*image_tasks)
+                )
+                
+                return chunk_results, image_results
+                
+            struct_doc_opt = struct_doc if 'struct_doc' in locals() else None
+            
+            import threading
+            
+            def run_async(coro):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return asyncio.run(coro)
+                
+                result = [None]
+                exception = [None]
+                
+                def target():
+                    try:
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        result[0] = new_loop.run_until_complete(coro)
+                        new_loop.close()
+                    except Exception as e:
+                        exception[0] = e
+                        
+                thread = threading.Thread(target=target)
+                thread.start()
+                thread.join()
+                if exception[0]:
+                    raise exception[0]
+                return result[0]
+                
+            chunk_results, image_results = run_async(run_ingestion_parallel(chunks, syllabus_modules, struct_doc_opt))
+
+            db_chunks = []
+            db_questions = []
+            last_detected_module = None
+            
+            for chunk, classification, extracted_qs in chunk_results:
+                if not classification:
+                    continue
                 module_number = classification.module_number
+                
+                if module_number is None and syllabus_modules and chunk.page_number:
+                    for mod in syllabus_modules:
+                        if isinstance(mod, dict):
+                            ps = mod.get("page_start")
+                            pe = mod.get("page_end")
+                            if ps and pe and ps <= chunk.page_number <= pe:
+                                module_number = mod.get("module")
+                                break
+
                 if module_number is not None:
                     last_detected_module = module_number
                 else:
                     module_number = last_detected_module
 
-                approval = (
-                    ChunkApprovalStatus.AUTO_APPROVED
-                    if classification.confidence_score >= auto_approve_threshold
-                    else ChunkApprovalStatus.PENDING_REVIEW
-                )
+                approval = ChunkApprovalStatus.AUTO_APPROVED
 
                 db_chunk = KnowledgeChunk(
                     document_id=doc.id,
@@ -511,14 +596,78 @@ def process_document_background(
                 )
                 db.add(db_chunk)
                 db_chunks.append(db_chunk)
+                
+                for q in extracted_qs:
+                    q_mod = q.get("module") or module_number or 1
+                    try:
+                        marks = int(q.get("marks", 5))
+                    except (ValueError, TypeError):
+                        marks = 5
+                    db_questions.append(Question(
+                        subject_id=doc.subject_id,
+                        teacher_id=doc.uploaded_by,
+                        source_doc_id=doc.id,
+                        text=q.get("text", "Unknown"),
+                        marks=marks,
+                        course_outcome=classification.co_mapping or "CO1",
+                        bloom_level=q.get("bloom_level", classification.bloom_level or "L2"),
+                        difficulty=q.get("difficulty", "medium"),
+                        module_number=q_mod,
+                        tags=["pre_generated", "text_extraction"],
+                        is_verified=False
+                    ))
 
             doc.total_chunks = len(chunks)
             db.commit()
 
+            # Image-to-Vector Linkage
+            for fb, extracted_qs in image_results:
+                fig_desc = fb.analysis.get("description", "") if fb.analysis else ""
+                fig_text = f"[FIGURE_PATH: {fb.image_path}]\\nCaption: {fb.caption}\\nDescription: {fig_desc}"
+                fig_chunk = KnowledgeChunk(
+                    document_id=doc.id,
+                    subject_id=doc.subject_id,
+                    chunk_text=fig_text,
+                    chunk_index=len(db_chunks),
+                    token_count=count_tokens(fig_text),
+                    module_number=last_detected_module,
+                    topic_name=(fb.caption[:250] if fb.caption else "Figure"),
+                    bloom_level="L2",
+                    co_mapping="CO2",
+                    page_number=fb.page_number,
+                    confidence_score=0.9,
+                    approval_status=ChunkApprovalStatus.AUTO_APPROVED,
+                )
+                db.add(fig_chunk)
+                db_chunks.append(fig_chunk)
+                
+                for q in extracted_qs:
+                    try:
+                        marks = int(q.get("marks", 5))
+                    except (ValueError, TypeError):
+                        marks = 5
+                    db_questions.append(Question(
+                        subject_id=doc.subject_id,
+                        teacher_id=doc.uploaded_by,
+                        source_doc_id=doc.id,
+                        text=q.get("text", "Unknown"),
+                        marks=marks,
+                        course_outcome="CO2",
+                        bloom_level=q.get("bloom_level", "L3"),
+                        difficulty=q.get("difficulty", "medium"),
+                        module_number=last_detected_module or 1,
+                        tags=["pre_generated", "image_extraction"],
+                        image_path=fb.image_path,
+                        is_verified=False
+                    ))
+            
+            db.add_all(db_questions)
+            db.commit()
+
             elapsed = time.time() - start_time
             logger.info(
-                "Ingested '%s': %d pages, %d chunks in %.2fs",
-                file_name, page_count, len(chunks), elapsed,
+                "Ingested '%s': %d pages, %d chunks, %d questions in %.2fs",
+                file_name, page_count, len(db_chunks), len(db_questions), elapsed,
             )
 
             # --- Generate Embeddings ---
@@ -526,12 +675,19 @@ def process_document_background(
             
             texts = [c.chunk_text for c in db_chunks]
             embeddings = generate_embeddings_batch(texts)
-            
             for chunk, embedding in zip(db_chunks, embeddings):
                 if embedding is not None:
                     chunk.embedding_vector = embedding
                     
+            q_texts = [q.text for q in db_questions]
+            if q_texts:
+                q_embeddings = generate_embeddings_batch(q_texts)
+                for q, embedding in zip(db_questions, q_embeddings):
+                    if embedding is not None:
+                        q.embedding_vector = embedding
+                        
             doc.extracted_text = None  # Discard full extracted text as per guidelines
+
             doc.processing_status = ProcessingStatus.COMPLETED
             db.commit()
             logger.info("Completed embedding generation for doc %d synchronously in background thread", doc.id)

@@ -46,7 +46,7 @@ FastAPI backend for the teacher, HOD, and admin workflows shown in the project f
 3. Run:
 
 ```bash
-uvicorn app.main:app --reload --app-dir backend
+uvicorn app.main:app --app-dir backend
 ```
 
 If `ALLOW_DEMO_SEED=true`, the app seeds demo users:

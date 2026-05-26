@@ -79,15 +79,15 @@ class UploadResponse(BaseModel):
 
 class GeneratePaperRequest(BaseModel):
     subject_id: int
-    title: str
-    exam_type: str
-    semester: str
-    batch: str
-    max_marks: int = Field(ge=5, le=200)
-    duration_minutes: int = Field(ge=30, le=240)
-    exam_date: date | None = None
-    teaching_department: str
-    prompt: str
+    title: str = "Question Paper"
+    exam_type: str = "Internal Assessment"
+    semester: str = "VI"
+    batch: str = "2023-2027"
+    max_marks: int = Field(default=50, ge=5, le=200)
+    duration_minutes: int = Field(default=90, ge=30, le=240)
+    exam_date: str | date | None = None
+    teaching_department: str = "CSE"
+    prompt: str = ""
     rbt_levels: list[str] = Field(default_factory=list)
     module_numbers: list[int] = Field(default_factory=list)
     difficulty_distribution: dict[str, int] = Field(default_factory=dict)
@@ -105,6 +105,7 @@ class GeneratePaperRequest(BaseModel):
     use_question_bank: bool = True
     use_previous_papers: bool = False
     use_syllabus: bool = True
+
 
 
 class PaperQuestionItem(BaseModel):

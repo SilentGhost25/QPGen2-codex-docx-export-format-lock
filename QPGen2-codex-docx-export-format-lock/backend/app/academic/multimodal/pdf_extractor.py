@@ -58,6 +58,8 @@ def extract_images_from_pdf(content: bytes) -> list[EmbeddedImage]:
         logger.warning("Could not open PDF for image extraction: %s", exc)
         return []
 
+    total_pages = len(doc)
+
     for page_index in range(len(doc)):
         page = doc[page_index]
         page_number = page_index + 1
@@ -110,7 +112,7 @@ def extract_images_from_pdf(content: bytes) -> list[EmbeddedImage]:
     logger.info(
         "Extracted %d embedded images from %d-page PDF",
         len(images),
-        len(doc) if not doc.is_closed else "?",
+        total_pages,
     )
     return images
 
