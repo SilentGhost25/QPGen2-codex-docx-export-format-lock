@@ -155,6 +155,9 @@ class PaperQuestion(Base):
     option_group: Mapped[str | None] = mapped_column(String(20), nullable=True)
     custom_marks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     question_text_snapshot: Mapped[str] = mapped_column(Text)
+    course_outcome_snapshot: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    bloom_level_snapshot: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    module_number_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     paper: Mapped["QuestionPaper"] = relationship(back_populates="questions")
 

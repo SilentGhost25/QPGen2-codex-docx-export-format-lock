@@ -122,7 +122,9 @@ def classify_chunk(
             confidence += 0.15
 
     # --- Topic Name ---
-    topic_name = matched_topic or _extract_topic(chunk_text, source_section)
+    from .topic_extractor import extract_academic_topic
+    raw_topic = matched_topic or _extract_topic(chunk_text, source_section)
+    topic_name = extract_academic_topic(raw_topic or chunk_text)
     if topic_name:
         confidence += 0.05
 

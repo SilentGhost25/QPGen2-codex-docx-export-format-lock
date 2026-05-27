@@ -27,7 +27,7 @@ class QuestionSlot:
     @property
     def qno_label(self) -> str:
         if self.subpart:
-            return f"{self.qno}({self.subpart})"
+            return f"{self.qno}{self.subpart}"
         return str(self.qno)
 
 
@@ -152,7 +152,7 @@ def _add_question_row(table, slot: QuestionSlot):
             import os
             if os.path.exists(slot.image_path):
                 run = para.add_run()
-                run.add_picture(slot.image_path, width=Inches(4.5))
+                run.add_picture(slot.image_path, width=Inches(2.5))
                 cells[1].add_paragraph()   # spacing after image
             else:
                 para.add_run(f"\n[Image not found: {slot.image_path}]\n")

@@ -230,6 +230,7 @@ class OllamaClient:
                 topic,
                 difficulty,
                 subject_code,
+                bloom_level=question.get("bloom_level"),
             )
             
             if not new_text:

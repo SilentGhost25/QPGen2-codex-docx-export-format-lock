@@ -217,16 +217,26 @@ def generate_questions_from_retrieval(
     # ---- 2. BUILD TOPIC GRAPH ----
     graph = build_topic_graph(db, subject_id)
     if not graph:
-        # Safe curriculum fallback if knowledge chunks are missing/pending ingestion
-        graph = [
-            TopicNode(
-                module=1,
-                topic="Syllabus Concepts",
-                keywords=["fundamental concepts", "key components"],
-                co="CO1",
-                bloom_level="L2"
-            )
-        ]
+        logger.error(
+            "Topic graph is empty for subject_id=%d — no KnowledgeChunks found. "
+            "Cannot generate grounded questions. Upload syllabus content first.",
+            subject_id,
+        )
+        # Return an empty result instead of hallucinating placeholder questions
+        return GenerationResult(
+            questions=[],
+            retrieval_summary={
+                "total_retrieved": 0,
+                "sources_used": [],
+                "topics_covered": [],
+                "error": "No knowledge chunks found — please upload syllabus content first.",
+            },
+            validation_summary={"total": 0, "valid": 0, "errors": 0, "warnings": 0},
+            generation_time=time.time() - start_time,
+            model_used="Template Compiler (Deterministic)",
+            creativity_level=0.0,
+            temperature=0.0,
+        )
 
     # ---- 3. COMPILE QUESTIONS ----
     generated_questions = []
@@ -298,7 +308,7 @@ def generate_questions_from_retrieval(
                 module_number=task["module"],
                 question_type="diagram" if is_image else task["question_type"],
                 topic_name=selected_node.topic,
-                source_chunk_ids=[],
+                source_chunk_ids=selected_node.chunk_ids,  # ← real chunk IDs for grounding
                 source_documents=[],
                 figure_image_paths=[selected_node.image_path] if is_image else [],
                 confidence=1.0,
@@ -309,6 +319,37 @@ def generate_questions_from_retrieval(
 
     # Sort to respect original blueprint layout
     generated_questions.sort(key=lambda q: q.task_index if q.task_index is not None else 999)
+
+    # ---- 4. GROUNDING FILTER ----
+    # Reject any question that contains hallucinated placeholder text or lacks chunk grounding.
+    from .validators.question_validator import validate_grounding
+
+    grounded: list[GeneratedQuestion] = []
+    rejected_count = 0
+    for gq in generated_questions:
+        # Build a lightweight dict for the grounding checker
+        gq_dict = {
+            "text": gq.text,
+            "source_chunk_id": gq.source_chunk_ids[0] if gq.source_chunk_ids else None,
+        }
+        result = validate_grounding(gq_dict)
+        if result.ok:
+            grounded.append(gq)
+        else:
+            rejected_count += 1
+            logger.warning(
+                "Grounding filter rejected question (topic=%r): %s",
+                gq.topic_name, " | ".join(result.errors),
+            )
+
+    if rejected_count:
+        logger.warning(
+            "Grounding filter: %d/%d questions rejected (hallucination/ungrounded). "
+            "Check KnowledgeChunk data quality.",
+            rejected_count, len(generated_questions)
+        )
+
+    generated_questions = grounded
 
     elapsed = time.time() - start_time
     logger.info(

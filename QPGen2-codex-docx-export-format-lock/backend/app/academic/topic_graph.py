@@ -45,6 +45,7 @@ class TopicNode:
     bloom_level: str = "L2"
     image_path: str | None = None
     content_summary: str = ""
+    chunk_ids: list[int] = field(default_factory=list)  # IDs of source KnowledgeChunks
 
 
 def extract_keywords_from_text(text: str) -> list[str]:
@@ -159,7 +160,8 @@ def build_topic_graph(
             co=co,
             bloom_level=bloom,
             image_path=image_path,
-            content_summary=combined_text[:300].strip() + "..."
+            content_summary=combined_text[:300].strip() + "...",
+            chunk_ids=[c.id for c in topic_chunks if c.id is not None],
         )
         topic_nodes.append(node)
 

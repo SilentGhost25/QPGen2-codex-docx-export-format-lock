@@ -123,7 +123,7 @@ function cell(
 }
 
 function formatQuestionLabel(questionNumber: number, subpart: string) {
-  return `${questionNumber}(${subpart})`;
+  return `${questionNumber}${subpart}`;
 }
 
 function normalizeQuestionLabel(label: string | undefined, fallback: string) {
@@ -132,98 +132,51 @@ function normalizeQuestionLabel(label: string | undefined, fallback: string) {
   return match ? formatQuestionLabel(Number(match[1]), match[2].toLowerCase()) : text;
 }
 
-function buildQuestionBlueprint(maxMarks: number): BlueprintSlot[] {
-  if (maxMarks <= 50) {
-    const patterns = [
-      ...Array.from({ length: 4 }, () => [5, 5] as const),
-      ...Array.from({ length: 6 }, () => [4, 6] as const),
-    ];
-
-    return patterns.flatMap(([partA, partB], index) => [
-      {
-        questionNumber: index + 1,
-        subpart: "a",
-        label: formatQuestionLabel(index + 1, "a"),
-        marks: partA,
-        moduleNumber: Math.floor(index / 2) + 1,
-      },
-      {
-        questionNumber: index + 1,
-        subpart: "b",
-        label: formatQuestionLabel(index + 1, "b"),
-        marks: partB,
-        moduleNumber: Math.floor(index / 2) + 1,
-      },
-    ]);
-  }
-
-  const rows = [
-    [1, "a", 6, 1],
-    [1, "b", 6, 1],
-    [1, "c", 8, 1],
-    [2, "a", 6, 1],
-    [2, "b", 6, 1],
-    [2, "c", 8, 1],
-    [3, "a", 5, 2],
-    [3, "b", 8, 2],
-    [3, "c", 7, 2],
-    [4, "a", 5, 2],
-    [4, "b", 8, 2],
-    [4, "c", 7, 2],
-    [5, "a", 5, 3],
-    [5, "b", 8, 3],
-    [5, "c", 7, 3],
-    [6, "a", 5, 3],
-    [6, "b", 8, 3],
-    [6, "c", 7, 3],
-    [7, "a", 10, 4],
-    [7, "b", 10, 4],
-    [8, "a", 10, 4],
-    [8, "b", 10, 4],
-    [9, "a", 10, 5],
-    [9, "b", 10, 5],
-    [10, "a", 10, 5],
-    [10, "b", 10, 5],
-  ] as const;
-
-  return rows.map(([questionNumber, subpart, marks, moduleNumber]) => ({
-    questionNumber,
-    subpart,
-    label: formatQuestionLabel(questionNumber, subpart),
-    marks,
-    moduleNumber,
-  }));
-}
-
 function buildPaperRows(maxMarks: number, questions: PaperQuestion[]): PaperRow[] {
-  const blueprint = buildQuestionBlueprint(maxMarks);
   const rows: PaperRow[] = [];
+  let currentModule = -1;
+  let currentBaseQuestion = -1;
 
-  blueprint.forEach((slot, index) => {
-    const question = questions[index];
-    const previousSlot = index > 0 ? blueprint[index - 1] : null;
-
-    if (maxMarks > 50 && (!previousSlot || previousSlot.moduleNumber !== slot.moduleNumber)) {
-      rows.push({ type: "module", title: `Module - ${slot.moduleNumber}` });
+  questions.forEach((q, index) => {
+    const qAny = q as any;
+    const label = (q.section_label || "").trim();
+    const match = label.match(/^(\d+)[(]?([a-z])?[)]?$/i);
+    let qNum = -1;
+    let subpart = "";
+    if (match) {
+      qNum = parseInt(match[1]);
+      subpart = match[2]?.toLowerCase() || "";
+    } else {
+      qNum = qAny.question_number || -1;
+      subpart = qAny.subpart || "";
     }
 
-    if (slot.subpart === "a" && slot.questionNumber % 2 === 0) {
-      rows.push({ type: "or" });
+    // Module logic
+    if (qNum > 0) {
+      const mod = Math.floor((qNum - 1) / 2) + 1;
+      if (mod !== currentModule) {
+        rows.push({ type: "module", title: `Module - ${mod}` });
+        currentModule = mod;
+      }
     }
 
-    const subQuestions = (question as any)?.subQuestions as PaperRow extends any
-      ? Array<{ label?: string; text: string }> | undefined
-      : never;
-    const hasSubQuestions = Boolean(subQuestions?.length);
+    // OR logic
+    if (qNum > 0 && qNum % 2 === 0 && qNum !== currentBaseQuestion) {
+      if (currentBaseQuestion !== -1) {
+        rows.push({ type: "or" });
+      }
+    }
+    if (qNum > 0) {
+      currentBaseQuestion = qNum;
+    }
 
     rows.push({
       type: "question",
-      qno: normalizeQuestionLabel(question?.section_label, slot.label),
-      text: question?.text || "",
-      marks: hasSubQuestions ? "" : String(question?.custom_marks ?? slot.marks),
-      co: hasSubQuestions ? "" : question?.course_outcome || "",
-      rbtl: hasSubQuestions ? "" : question?.bloom_level || "",
-      subQuestions,
+      qno: normalizeQuestionLabel(label, label),
+      text: q.text || "",
+      marks: String(qAny.custom_marks ?? qAny.marks ?? ""),
+      co: q.course_outcome || "",
+      rbtl: q.bloom_level || "",
     });
   });
 

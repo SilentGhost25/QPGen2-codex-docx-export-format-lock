@@ -19,6 +19,7 @@ across papers without any LLM inference.
 from __future__ import annotations
 
 import random
+import re
 from typing import Any
 
 
@@ -29,86 +30,86 @@ from typing import Any
 QUESTION_TEMPLATES: dict[str, list[str]] = {
     # L1 — Remember
     "L1": [
-        "Define {topic}.",
-        "List the key features of {topic}.",
+        "Define {topic} and state its core significance.",
+        "List the key characteristics and structural features of {topic}.",
         "State the significance of {topic} in the context of {keyword}.",
-        "What is {topic}? Mention its characteristics.",
-        "Name the components of {topic}.",
-        "Outline the basic concepts of {topic}.",
-        "Recall the fundamental principles of {topic}.",
-        "Identify the main elements of {topic}.",
-        "Enumerate the types of {topic}.",
-        "Write a short note on {topic}.",
+        "What is {topic}? Enumerate its distinct operational characteristics.",
+        "Identify and name the essential components that constitute {topic}.",
+        "Outline the foundational concepts and architectural elements of {topic}.",
+        "State the fundamental principles governing the operation of {topic}.",
+        "Identify the main elements of {topic} and briefly state their respective functions.",
+        "Enumerate the various classifications and types of {topic}.",
+        "Write a structured and concise technical note on {topic}.",
     ],
 
     # L2 — Understand
     "L2": [
-        "Explain {topic} with a suitable example.",
-        "Describe the working principle of {topic}.",
-        "Summarize the concept of {topic} and its applications.",
-        "Classify the different types of {topic}.",
-        "Discuss the role of {keyword} in {topic}.",
-        "Illustrate {topic} with a neat diagram.",
-        "Distinguish between the various approaches used in {topic}.",
-        "Interpret the significance of {keyword} in the context of {topic}.",
-        "Explain the advantages and limitations of {topic}.",
-        "Describe {topic} and its relevance to {keyword}.",
+        "Explain the working principle and concept of {topic} with a suitable example.",
+        "Describe the systematic working mechanism and operational workflow of {topic}.",
+        "Summarize the core concept of {topic} and highlight its primary applications.",
+        "Classify the different types of {topic} and explain their distinguishing features.",
+        "Elucidate the functional role and significance of {keyword} in {topic}.",
+        "Illustrate the block architecture and components of {topic} with a neat schematic diagram.",
+        "Distinguish between the various methodological approaches employed in {topic}.",
+        "Interpret the structural significance of {keyword} in the context of {topic}.",
+        "Explain the comparative advantages, operational limitations, and use-cases of {topic}.",
+        "Describe {topic} in detail, highlighting its operational relevance to {keyword}.",
     ],
 
     # L3 — Apply
     "L3": [
-        "Apply {topic} to solve a suitable problem and show the steps involved.",
-        "Demonstrate the working of {topic} with an example.",
-        "Solve a problem using {topic}. Show all intermediate steps.",
-        "Compute the result using {topic} for a given input.",
-        "Illustrate the application of {topic} in {keyword} with a worked example.",
-        "Show how {topic} can be used to determine the output for a given scenario.",
-        "Apply the concept of {keyword} in {topic} to a practical problem.",
-        "Determine the output of {topic} for the given input parameters.",
-        "Using {topic}, solve the following and explain each step.",
-        "Demonstrate with an example how {topic} handles {keyword}.",
+        "Apply the principles of {topic} to solve the given problem, detailing each step of the solution.",
+        "Demonstrate the practical implementation and working of {topic} using a well-defined illustrative example.",
+        "Solve the given analytical problem using {topic}, showing all intermediate steps clearly.",
+        "Compute the exact output parameters using {topic} for the specified input conditions.",
+        "Illustrate the practical application of {topic} in {keyword} through a worked numerical or logical example.",
+        "Show how the concept of {topic} can be systematically used to determine the output for a given scenario.",
+        "Apply the concept of {keyword} within {topic} to model and solve a practical engineering problem.",
+        "Determine the optimal output or configuration of {topic} for the given input parameters.",
+        "Using the framework of {topic}, solve the following problem and explain each analytical step.",
+        "Demonstrate with a suitable scenario how {topic} effectively handles {keyword}.",
     ],
 
     # L4 — Analyze
     "L4": [
-        "Analyze the time and space complexity of {topic}.",
-        "Compare and contrast {topic} with {keyword}.",
-        "Differentiate between {topic} and {keyword} with suitable examples.",
-        "Examine the advantages and disadvantages of {topic}.",
-        "Analyze the role of {keyword} in the performance of {topic}.",
-        "Compare {topic} and {keyword2} in terms of efficiency and applicability.",
-        "Distinguish between {topic} and {keyword} with a tabular comparison.",
-        "Analyze the behavior of {topic} under different input conditions.",
-        "Examine how {keyword} affects the correctness of {topic}.",
-        "Critically analyze the limitations of {topic} in real-world scenarios.",
+        "Analyze the time and space complexity of {topic} and express them in asymptotic notations.",
+        "Conduct a rigorous comparative study between {topic} and {keyword}.",
+        "Differentiate between the functional characteristics of {topic} and {keyword} with suitable examples.",
+        "Examine the structural advantages, performance trade-offs, and design constraints of {topic}.",
+        "Analyze the specific impact of {keyword} on the overall performance and throughput of {topic}.",
+        "Compare and contrast {topic} and {keyword2} in terms of efficiency, scalability, and applicability.",
+        "Distinguish between the execution characteristics of {topic} and {keyword} with a structured tabular comparison.",
+        "Analyze and explain the behavior of {topic} under varying or extreme input conditions.",
+        "Examine how the presence of {keyword} affects the correctness, stability, and efficiency of {topic}.",
+        "Critically analyze the operational limitations and bottlenecks of {topic} in real-world large-scale scenarios.",
     ],
 
     # L5 — Evaluate
     "L5": [
-        "Evaluate the effectiveness of {topic} in real-world applications.",
-        "Justify the use of {topic} over alternative approaches for {keyword}.",
-        "Assess the performance of {topic} with respect to {keyword}.",
-        "Evaluate the trade-offs involved in using {topic}.",
-        "Critique the approach used in {topic} and suggest improvements.",
-        "Justify why {topic} is preferred for solving problems involving {keyword}.",
-        "Assess the suitability of {topic} for large-scale applications.",
-        "Evaluate the impact of {keyword} on the overall performance of {topic}.",
-        "Compare and evaluate {topic} and {keyword} for practical applications.",
-        "Defend the choice of {topic} over other methods with supporting arguments.",
+        "Evaluate the performance and effectiveness of {topic} in real-world application benchmarks.",
+        "Justify the adoption of {topic} over alternative methodological approaches for {keyword}.",
+        "Assess the scalability and throughput of {topic} with respect to the constraints of {keyword}.",
+        "Evaluate the trade-offs involved in using {topic} and recommend optimal parameter configurations.",
+        "Critique the design of the approach used in {topic} and suggest structural improvements.",
+        "Justify why {topic} is preferred for solving complex problems involving {keyword} with supporting technical evidence.",
+        "Assess the architectural suitability of {topic} for large-scale enterprise applications.",
+        "Evaluate the specific impact of {keyword} on the stability and overall performance of {topic}.",
+        "Compare and evaluate the robustness of {topic} and {keyword} for practical production deployments.",
+        "Defend the selection of {topic} over competing methods with strong technical and architectural arguments.",
     ],
 
     # L6 — Create
     "L6": [
-        "Design a solution using {topic} for the given problem scenario.",
-        "Develop an algorithm based on {topic} to solve {keyword}.",
-        "Propose a modification to {topic} that improves its efficiency.",
-        "Formulate a new approach combining {topic} with {keyword}.",
-        "Construct a system that leverages {topic} for {keyword}.",
-        "Create a step-by-step procedure using {topic} to handle {keyword}.",
-        "Design and implement an optimized version of {topic}.",
-        "Plan a solution architecture using {topic} for the given requirements.",
-        "Propose an extension to {topic} that addresses its known limitations.",
-        "Develop a framework that integrates {topic} with {keyword}.",
+        "Design a comprehensive solution framework using {topic} for the given problem scenario.",
+        "Develop an optimized algorithm based on {topic} to solve {keyword}.",
+        "Propose a novel modification to {topic} that significantly improves its time or space efficiency.",
+        "Formulate an integrated approach combining the strengths of {topic} with {keyword}.",
+        "Construct an architectural system design that leverages {topic} to handle {keyword}.",
+        "Create a systematic, step-by-step technical procedure using {topic} to manage {keyword}.",
+        "Design and implement a highly optimized, scalable version of {topic}.",
+        "Plan a detailed solution architecture using {topic} to satisfy the given system requirements.",
+        "Propose an architectural extension to {topic} that addresses its known scalability limitations.",
+        "Develop a unified framework that seamlessly integrates {topic} with the features of {keyword}.",
     ],
 }
 
@@ -119,29 +120,29 @@ QUESTION_TEMPLATES: dict[str, list[str]] = {
 
 IMAGE_QUESTION_TEMPLATES: dict[str, list[str]] = {
     "L1": [
-        "Identify the components shown in the diagram related to {topic}.",
-        "With reference to the given figure, list the elements of {topic}.",
+        "Identify and label the distinct components shown in the diagram related to {topic}.",
+        "With reference to the given figure, enumerate the key elements and connections of {topic}.",
     ],
     "L2": [
-        "Explain the concept of {topic} with reference to the given figure.",
-        "Describe the process illustrated in the diagram related to {topic}.",
-        "With a neat diagram, explain {topic}.",
+        "Explain the fundamental concept of {topic} in detail with reference to the illustration in the given figure.",
+        "Describe the systematic process flow illustrated in the diagram related to {topic}.",
+        "Sketch a neat schematic diagram and explain the operational block architecture of {topic}.",
     ],
     "L3": [
-        "Using the given diagram, apply {topic} and determine the result.",
-        "With reference to the figure, demonstrate the working of {topic}.",
+        "Using the given diagram, apply the principles of {topic} and compute the final output result.",
+        "With reference to the provided figure, demonstrate the step-by-step working of {topic}.",
     ],
     "L4": [
-        "Analyze the state-space representation shown in the figure for {topic}.",
-        "Compare the two approaches illustrated in the diagram for {topic}.",
+        "Analyze the state-space transition representation shown in the figure for {topic}.",
+        "Analyze and compare the two alternative approaches illustrated in the diagram for {topic}.",
     ],
     "L5": [
-        "Evaluate the correctness of the solution shown in the figure for {topic}.",
-        "Assess the approach depicted in the given diagram for {topic}.",
+        "Critically evaluate the correctness and efficiency of the solution shown in the figure for {topic}.",
+        "Assess the architectural approach depicted in the given diagram for {topic} with respect to design standards.",
     ],
     "L6": [
-        "Design an improved version of the process shown in the figure for {topic}.",
-        "Propose modifications to the architecture depicted in the diagram for {topic}.",
+        "Design an optimized and improved version of the process flow shown in the figure for {topic}.",
+        "Propose systematic modifications to the system architecture depicted in the diagram for {topic}.",
     ],
 }
 
@@ -188,6 +189,62 @@ def get_marks_suffix(marks: int) -> str:
 # ---------------------------------------------------------------------------
 # Template compilation function
 # ---------------------------------------------------------------------------
+
+BAD_PHRASES = [
+    "topic outcome",
+    "from the perspective of",
+    "as discussed in",
+    "in relation to",
+    "with references to the text",
+    "fundamental concepts",
+]
+
+QUESTION_INTENTS = {
+    "L1": ["Define", "List", "Identify"],
+    "L2": ["Explain", "Describe", "Summarize"],
+    "L3": ["Apply", "Demonstrate", "Solve"],
+    "L4": ["Analyze", "Differentiate", "Compare"],
+    "L5": ["Evaluate", "Critique", "Justify"],
+    "L6": ["Design", "Develop", "Propose"]
+}
+
+def sanitize_and_normalize_question(text: str, bloom_level: str, topic: str = "") -> str:
+    """
+    Sanitize question text by blacklisting LLM fluff/OCR artifacts, enforcing precise
+    academic Bloom verbs, and clamping length to max 18 words for true direct VTU style.
+    """
+    # 1. Clean bad phrases
+    for phrase in BAD_PHRASES:
+        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
+
+    # Clean double spaces/stray grammar marks
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([.,!?])", r"\1", text)
+
+    # 2. Map precise academic intents
+    level = bloom_level.strip().upper()
+    intents = QUESTION_INTENTS.get(level, ["Explain"])
+    
+    words = text.split()
+    if words:
+        first_word = words[0].rstrip(",.:;!?")
+        # If the first word is a generic verb or not in the specific intent category,
+        # we map it to the primary intent verb for that level.
+        generic_verbs = {"discuss", "explain", "describe", "analyze", "evaluate", "critique", "design", "develop", "define", "list"}
+        if first_word.lower() in generic_verbs:
+            target_intent = intents[0]
+            if first_word.lower() != target_intent.lower():
+                words[0] = target_intent
+                text = " ".join(words)
+
+    # 3. Clamp word length to max 18 words (direct VTU style)
+    words = text.split()
+    if len(words) > 18:
+        text = " ".join(words[:18])
+        if not text.endswith(".") and not text.endswith("?"):
+            text += "."
+            
+    return text.strip()
 
 def compile_question(
     topic: str,
@@ -254,4 +311,5 @@ def compile_question(
     elif suffix:
         question = question + suffix
 
-    return question.strip()
+    compiled = question.strip()
+    return sanitize_and_normalize_question(compiled, level, topic)

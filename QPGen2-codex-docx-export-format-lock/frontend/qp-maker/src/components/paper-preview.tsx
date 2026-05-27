@@ -28,7 +28,7 @@ const DEFAULT_COS = {
 };
 
 function formatQuestionLabel(questionNumber: number, subpart: string) {
-  return `${questionNumber}(${subpart})`;
+  return `${questionNumber}${subpart}`;
 }
 
 function normalizeQuestionLabel(label: string | undefined, fallback: string) {
@@ -73,7 +73,7 @@ function normalizeQuestions(questions: PaperQuestion[], maxMarks: number): Paper
     }
     
     // Module logic
-    if (qNum > 0 && maxMarks > 50) {
+    if (qNum > 0) {
       const mod = Math.floor((qNum - 1) / 2) + 1;
       if (mod !== currentModule) {
         rows.push({ type: "module", title: `Module - ${mod}`, key: `module-${mod}` });
@@ -82,13 +82,13 @@ function normalizeQuestions(questions: PaperQuestion[], maxMarks: number): Paper
     }
 
     // OR logic
-    if (qNum > 0 && qNum % 2 === 0 && qNum !== currentBaseQuestion && subpart === "a") {
+    if (qNum > 0 && qNum % 2 === 0 && qNum !== currentBaseQuestion) {
       if (currentBaseQuestion !== -1) {
         rows.push({ type: "or", key: `or-${qNum}` });
       }
     }
     if (qNum > 0) {
-        currentBaseQuestion = qNum;
+      currentBaseQuestion = qNum;
     }
 
     rows.push({

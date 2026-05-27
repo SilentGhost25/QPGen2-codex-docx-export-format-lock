@@ -3,7 +3,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowDown, ArrowUp, Check, ChevronRight, Download, Edit, FileText, RotateCw, Search, Settings2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronRight, ClipboardList, Download, Edit, FileText, RotateCw, Search, Settings2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -25,8 +25,13 @@ import {
   useAIGeneratePaper,
   useQuestionBankSummary,
   useQuestions,
+  useUpdateQuestion,
 } from "@/lib/ai-api";
 import { exportToDocx } from "@/utils/docxExport";
+import { COCoverageTable } from "@/components/COCoverageTable";
+import { QuestionReviewPanel } from "@/components/QuestionReviewPanel";
+import { useSyllabus as useSyllabusQuery } from "@/lib/academic-api";
+
 
 const step1Schema = z.object({
   department: z.string().min(1, "Required"),
@@ -44,7 +49,8 @@ const step1Schema = z.object({
 const steps = [
   { id: 1, name: "Configuration", icon: Settings2 },
   { id: 2, name: "Strategy", icon: FileText },
-  { id: 3, name: "Preview", icon: Check }
+  { id: 3, name: "Review", icon: ClipboardList },
+  { id: 4, name: "Preview", icon: Check }
 ];
 
 function buildQuestionBlueprint(maxMarks: number) {
@@ -131,6 +137,8 @@ function questionOverlapScore(left: string, right: string) {
 export default function GeneratePaper() {
   const [currentStep, setCurrentStep] = useState(1);
   const [isAutoGenerate, setIsAutoGenerate] = useState(true);
+  const [reviewAllocations, setReviewAllocations] = useState<Record<string, any>>({});
+  const updateQuestionMutation = useUpdateQuestion();
   const [generatedQuestions, setGeneratedQuestions] = useState<GeneratedPaper["questions"]>([]);
   const [generatedPaper, setGeneratedPaper] = useState<GeneratedPaper | null>(null);
   const [manualSearch, setManualSearch] = useState("");
@@ -209,10 +217,21 @@ export default function GeneratePaper() {
 
   useEffect(() => {
     if (generatePaperMutation.isSuccess && generatePaperMutation.data) {
-      setGeneratedPaper(generatePaperMutation.data);
-      setGeneratedQuestions(generatePaperMutation.data.questions || []);
+      const paper = generatePaperMutation.data;
+      setGeneratedPaper(paper);
+      const questions = paper.questions || [];
+      setGeneratedQuestions(questions);
+      // Build reviewAllocations: map slot label → question
+      const alloc: Record<string, any> = {};
+      questions.forEach((q: any) => {
+        const label = q.section_label || q.slot_label;
+        if (label) {
+          alloc[label] = q;
+        }
+      });
+      setReviewAllocations(alloc);
       setCurrentStep(3);
-      toast.success("Question paper generated successfully!");
+      toast.success("Question paper generated! Please review the questions.");
       generatePaperMutation.reset();
     }
   }, [generatePaperMutation.isSuccess, generatePaperMutation.data]);
@@ -265,6 +284,9 @@ export default function GeneratePaper() {
   const { data: subjectQuestions = [], isLoading: isLoadingManualQuestions } = useQuestions(
     selectedSubjectId ? parseInt(selectedSubjectId) : undefined,
   );
+  const { data: syllabusData } = useSyllabusQuery(
+    selectedSubjectId ? parseInt(selectedSubjectId) : 0
+  );
 
   useEffect(() => {
     if (!selectedSubject) {
@@ -282,6 +304,28 @@ export default function GeneratePaper() {
     setManualSelectedIds([]);
     setManualSearch("");
   }, [selectedSubjectId, selectedMaxMarks]);
+
+  useEffect(() => {
+    if (syllabusData?.co_json) {
+      setCoDescriptions((prev) => {
+        const next = { ...prev };
+        Object.entries(syllabusData.co_json || {}).forEach(([co, desc]) => {
+          if (desc) {
+            next[co] = String(desc);
+          }
+        });
+        return next;
+      });
+    } else {
+      setCoDescriptions({
+        CO1: "",
+        CO2: "",
+        CO3: "",
+        CO4: "",
+        CO5: "",
+      });
+    }
+  }, [syllabusData]);
 
   const manualQuestionResults = useMemo(() => {
     const searchTerm = deferredManualSearch.trim().toLowerCase();
@@ -366,9 +410,10 @@ export default function GeneratePaper() {
       
       if (!isAutoGenerate) {
         manualSelectedQuestions.forEach((q) => {
-          const mod = q.module_number;
-          const qno = q.question_number;
-          const sub = q.subpart || "a";
+          const qAny = q as any;
+          const mod = qAny.module_number;
+          const qno = qAny.question_number;
+          const sub = qAny.subpart || "a";
           if (!moduleSubpartCounts[mod]) moduleSubpartCounts[mod] = {};
           if (!moduleSubpartCounts[mod][qno]) moduleSubpartCounts[mod][qno] = new Set();
           moduleSubpartCounts[mod][qno].add(sub);
@@ -1103,6 +1148,80 @@ export default function GeneratePaper() {
           )}
 
           {currentStep === 3 && (
+            <motion.div
+              key="step3-review"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+            >
+              <CardHeader className="flex flex-row items-center justify-between border-b pb-4">
+                <div>
+                  <CardTitle>Question Review Stage</CardTitle>
+                  <CardDescription>
+                    Inspect, verify, swap, or edit individual questions before compiling the final paper.
+                  </CardDescription>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setCurrentStep(2)} disabled={isGenerating}>
+                    <Edit className="mr-2 h-4 w-4" /> Back to Strategy
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={generateQuestions} disabled={isGenerating}>
+                    <RotateCw className={`mr-2 h-4 w-4 ${isGenerating ? "animate-spin" : ""}`} /> Regenerate
+                  </Button>
+                  <Button size="sm" onClick={() => setCurrentStep(4)} disabled={generatedQuestions.length === 0}>
+                    <ChevronRight className="mr-2 h-4 w-4" /> Proceed to Preview
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="p-6 space-y-8">
+                {generatedQuestions.length === 0 ? (
+                  <div className="rounded-xl border border-dashed bg-background px-6 py-12 text-center text-sm text-muted-foreground">
+                    No questions generated yet. Go back to Strategy and generate a paper first.
+                  </div>
+                ) : (
+                  <>
+                    <COCoverageTable questions={generatedQuestions as any[]} moduleCOMap={moduleCOMap} />
+                    <QuestionReviewPanel
+                      blueprint={blueprint}
+                      allocatedQuestions={reviewAllocations}
+                      subjectQuestions={subjectQuestions as any[]}
+                      onQuestionChange={(slotLabel, nextQuestion) => {
+                        setReviewAllocations((prev) => ({ ...prev, [slotLabel]: nextQuestion }));
+                        setGeneratedQuestions((prev) =>
+                          prev.map((q: any) =>
+                            (q.section_label === slotLabel || q.slot_label === slotLabel)
+                              ? { ...q, ...nextQuestion }
+                              : q
+                          )
+                        );
+                      }}
+                      onQuestionTextEdit={(slotLabel, editedText) => {
+                        setReviewAllocations((prev) => ({
+                          ...prev,
+                          [slotLabel]: { ...prev[slotLabel], text: editedText },
+                        }));
+                        setGeneratedQuestions((prev) =>
+                          prev.map((q: any) =>
+                            (q.section_label === slotLabel || q.slot_label === slotLabel)
+                              ? { ...q, text: editedText }
+                              : q
+                          )
+                        );
+                        if (updateQuestionMutation && reviewAllocations[slotLabel]?.id) {
+                          updateQuestionMutation.mutate({
+                            id: reviewAllocations[slotLabel].id,
+                            text: editedText,
+                          });
+                        }
+                      }}
+                    />
+                  </>
+                )}
+              </CardContent>
+            </motion.div>
+          )}
+
+          {currentStep === 4 && (
             <motion.div
               key="step3"
               initial={{ opacity: 0, x: 20 }}

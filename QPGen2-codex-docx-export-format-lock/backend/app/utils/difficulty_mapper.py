@@ -7,6 +7,8 @@ depends on the frontend passing a difficulty value.
 
 from __future__ import annotations
 
+from typing import Any
+
 BLOOM_DIFFICULTY_MAP: dict[str, str] = {
     "L1": "easy",
     "L2": "easy",
@@ -27,21 +29,26 @@ def derive_difficulty(bloom_level: str | None) -> str:
     return BLOOM_DIFFICULTY_MAP.get(str(bloom_level).strip().upper(), "medium")
 
 
-def safe_question_payload(question: dict) -> dict:
-    """Normalise a raw question dict into a safe, serialisable payload.
+def safe_question_payload(question: Any) -> dict:
+    """Normalise a raw question dict or object into a safe, serialisable payload.
 
     Ensures ``difficulty`` is always present and derived from Bloom level.
     """
+    def qget(field: str, default: Any = None) -> Any:
+        if isinstance(question, dict):
+            return question.get(field, default)
+        return getattr(question, field, default)
+
     bloom = (
-        question.get("bloom_level")
-        or question.get("bloom")
-        or question.get("rbt_level")
+        qget("bloom_level")
+        or qget("bloom")
+        or qget("rbt_level")
         or "L3"
     )
     return {
-        "question_text": (question.get("text") or question.get("question_text") or "").strip(),
-        "marks": int(question.get("marks", 0)),
-        "co": question.get("course_outcome") or question.get("co") or "CO1",
+        "question_text": (qget("text") or qget("question_text") or "").strip(),
+        "marks": int(qget("marks", 0)),
+        "co": qget("course_outcome") or qget("co") or "CO1",
         "bloom": bloom,
         "difficulty": derive_difficulty(bloom),
     }

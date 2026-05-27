@@ -1,30 +1,29 @@
 """
-Semantic chunking engine for academic documents.
+Semantic hierarchical chunking engine for academic documents.
 
 Strategy:
-- 400-800 token chunks with 10-15% overlap
-- Respects paragraph/section boundaries
-- Preserves academic structure (headings, lists, formulas)
-- Never splits mid-sentence
+- Heading-aware section parsing to split by logical syllabus modules/topics
+- Normalizes and cleans OCR fragments, headers/footers, and symbol leaks
+- Inspects and infers microchunk functional types (definition, algorithm, advantages, applications, examples)
+- Strictly filters out low-quality and unacademic OCR garbage paragraphs
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from .topic_extractor import extract_academic_topic
 
 logger = logging.getLogger("app.academic.chunking")
 
 # ---------------------------------------------------------------------------
-# Token counting (lightweight, no external dependency required)
+# Token counting
 # ---------------------------------------------------------------------------
 
 def count_tokens(text: str) -> int:
-    """Approximate token count using whitespace splitting.
-    
-    For production accuracy, swap with tiktoken or the model's tokenizer.
-    """
+    """Approximate token count using whitespace splitting."""
     return len(re.findall(r"\S+", text))
 
 
@@ -40,7 +39,7 @@ class AcademicChunk:
     token_count: int
     page_number: int | None = None
     source_section: str | None = None
-    # Inferred metadata (set by classifier)
+    # Inferred metadata
     module_number: int | None = None
     topic_name: str | None = None
     bloom_level: str | None = None
@@ -49,45 +48,103 @@ class AcademicChunk:
 
 
 # ---------------------------------------------------------------------------
-# Section detection
+# Heading awareness patterns
 # ---------------------------------------------------------------------------
 
-# Patterns that indicate a new section/heading in academic text
 _HEADING_PATTERNS = [
-    re.compile(r"^#{1,4}\s+", re.MULTILINE),                          # Markdown headings
-    re.compile(r"^(?:Module|MODULE|Unit|UNIT)\s*[-:]?\s*\d", re.MULTILINE),  # Module/Unit headers
-    re.compile(r"^(?:Chapter|CHAPTER)\s+\d", re.MULTILINE),            # Chapter headers
-    re.compile(r"^\d+\.\s+[A-Z]", re.MULTILINE),                      # Numbered sections
-    re.compile(r"^(?:Introduction|Conclusion|Summary|References)\b", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^#{1,4}\s+", re.MULTILINE),
+    re.compile(r"^(?:Module|MODULE|Unit|UNIT)\s*[-:]?\s*\d+", re.MULTILINE),
+    re.compile(r"^(?:Chapter|CHAPTER)\s+\d+", re.MULTILINE),
+    re.compile(r"^\d+\.\d+", re.MULTILINE),
+    re.compile(r"^[A-Z][A-Z\s]{4,}$", re.MULTILINE),
 ]
-
 
 def _is_heading(line: str) -> bool:
     """Check if a line looks like a section heading."""
     stripped = line.strip()
-    if not stripped:
-        return False
-    if len(stripped) > 200:
+    if not stripped or len(stripped) > 200:
         return False
     return any(pattern.match(stripped) for pattern in _HEADING_PATTERNS)
 
 
-def _split_into_paragraphs(text: str) -> list[str]:
-    """Split text into paragraphs respecting double newlines."""
-    raw_blocks = re.split(r"\n\s*\n", text)
-    paragraphs = []
-    for block in raw_blocks:
-        cleaned = block.strip()
-        if cleaned:
-            paragraphs.append(cleaned)
-    return paragraphs
+# ---------------------------------------------------------------------------
+# OCR Cleaning and Quality Filters
+# ---------------------------------------------------------------------------
+
+BAD_OCR_PATTERNS = [
+    re.compile(r"Page \d+", re.IGNORECASE),
+    re.compile(r"FIGURE \d+", re.IGNORECASE),
+    re.compile(r"\.{3,}"),
+]
+
+def clean_ocr(text: str) -> str:
+    """Sanitize and clean raw extracted text from OCR fragments and margins."""
+    for pattern in BAD_OCR_PATTERNS:
+        text = pattern.sub("", text)
+    # Deduplicate whitespaces
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def is_high_quality(text: str) -> bool:
+    """Filter out paragraphs dominated by formulas, lists of numbers, or OCR garbage."""
+    words = text.split()
+    if len(words) < 20:
+        return False
+    
+    # Check alphabetic character density
+    alphabetic = sum(1 for c in text if c.isalpha())
+    if not text:
+        return False
+    if alphabetic / len(text) < 0.35:
+        return False
+        
+    return True
+
+def infer_microchunk_type(text: str) -> str:
+    """Infers microchunk subtype classification to populate chunk_summary."""
+    lower = text.lower()
+    if any(kw in lower for kw in ["define", "what is", "definition", "recall", "state the"]):
+        return "definition"
+    if any(kw in lower for kw in ["algorithm", "step", "procedure", "flowchart", "pseudocode", "mechanism"]):
+        return "algorithm"
+    if any(kw in lower for kw in ["advantage", "disadvantage", "limitation", "pros", "cons", "trade-off", "benefit"]):
+        return "advantages"
+    if any(kw in lower for kw in ["application", "use", "applied in", "scenario", "use-case"]):
+        return "applications"
+    if any(kw in lower for kw in ["example", "solve", "illustration", "numerical", "worked"]):
+        return "examples"
+    return "concept"
 
 
-def _split_into_sentences(text: str) -> list[str]:
-    """Split text into sentences, trying not to break on abbreviations."""
-    # Simple sentence splitter that avoids common abbreviations
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
-    return [p.strip() for p in parts if p.strip()]
+# ---------------------------------------------------------------------------
+# Hierarchical Splitters
+# ---------------------------------------------------------------------------
+
+def split_by_headings(text: str) -> list[tuple[str, str]]:
+    """Split full document text by heading hierarchy."""
+    lines = text.split("\n")
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = "General Introduction"
+    current_lines: list[str] = []
+
+    for line in lines:
+        if _is_heading(line):
+            if current_lines:
+                sections.append((current_heading, current_lines))
+            current_heading = line.strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_lines or current_heading != "General Introduction":
+        sections.append((current_heading, current_lines))
+
+    result = []
+    for heading, lines_list in sections:
+        content = "\n".join(lines_list).strip()
+        if content:
+            result.append((heading, content))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -102,135 +159,90 @@ def semantic_chunk(
     page_numbers: dict[int, int] | None = None,
 ) -> list[AcademicChunk]:
     """
-    Split academic text into semantically meaningful chunks.
-
-    Args:
-        text: Full extracted text from a document.
-        min_tokens: Minimum chunk size in tokens.
-        max_tokens: Maximum chunk size in tokens.
-        overlap_ratio: Fraction of overlap between consecutive chunks (0.10-0.15).
-        page_numbers: Optional mapping of character offset -> page number.
-
-    Returns:
-        List of AcademicChunk objects.
+    Split academic text into hierarchical, topic-centered semantic chunks.
     """
     if not text or not text.strip():
         return []
 
-    paragraphs = _split_into_paragraphs(text)
-    if not paragraphs:
+    sections = split_by_headings(text)
+    if not sections:
         return []
 
     overlap_tokens = int(max_tokens * overlap_ratio)
     chunks: list[AcademicChunk] = []
-    current_parts: list[str] = []
-    current_tokens = 0
-    current_section: str | None = None
     chunk_index = 0
 
-    def _flush_chunk(parts: list[str], section: str | None) -> None:
-        nonlocal chunk_index
-        if not parts:
-            return
-        chunk_text = "\n\n".join(parts).strip()
-        if not chunk_text or count_tokens(chunk_text) < 20:
-            return
+    def _get_overlap_text(words_list: list[str], overlap_size: int) -> str:
+        if len(words_list) <= overlap_size:
+            return " ".join(words_list)
+        return " ".join(words_list[-overlap_size:])
 
-        page_num = None
-        if page_numbers:
-            # Find the page number for the start of this chunk
-            char_offset = text.find(parts[0][:50])
-            if char_offset >= 0:
-                for offset, page in sorted(page_numbers.items()):
-                    if offset <= char_offset:
-                        page_num = page
-                    else:
-                        break
-
-        chunks.append(AcademicChunk(
-            text=chunk_text,
-            chunk_index=chunk_index,
-            token_count=count_tokens(chunk_text),
-            page_number=page_num,
-            source_section=section,
-        ))
-        chunk_index += 1
-
-    for paragraph in paragraphs:
-        para_tokens = count_tokens(paragraph)
-
-        # Track section headings
-        if _is_heading(paragraph):
-            current_section = paragraph.strip()
-
-        # If a single paragraph exceeds max_tokens, split it into sentences
-        if para_tokens > max_tokens:
-            # Flush what we have first
-            if current_parts:
-                _flush_chunk(current_parts, current_section)
-                # Keep overlap
-                overlap_text = _get_overlap_text(current_parts, overlap_tokens)
-                current_parts = [overlap_text] if overlap_text else []
-                current_tokens = count_tokens(overlap_text) if overlap_text else 0
-
-            # Split the large paragraph into sentence-level chunks
-            sentences = _split_into_sentences(paragraph)
-            sent_buffer: list[str] = []
-            sent_tokens = 0
-            for sentence in sentences:
-                st = count_tokens(sentence)
-                if sent_tokens + st > max_tokens and sent_buffer:
-                    combined = " ".join(sent_buffer)
-                    _flush_chunk([combined], current_section)
-                    overlap_text = _get_overlap_text([combined], overlap_tokens)
-                    sent_buffer = [overlap_text, sentence] if overlap_text else [sentence]
-                    sent_tokens = count_tokens(overlap_text) + st if overlap_text else st
-                else:
-                    sent_buffer.append(sentence)
-                    sent_tokens += st
-            if sent_buffer:
-                current_parts.append(" ".join(sent_buffer))
-                current_tokens += sent_tokens
+    for heading, content in sections:
+        cleaned_content = clean_ocr(content)
+        if not is_high_quality(cleaned_content):
             continue
 
-        # Would adding this paragraph exceed max?
-        if current_tokens + para_tokens > max_tokens and current_parts:
-            _flush_chunk(current_parts, current_section)
-            # Create overlap from the end of previous chunk
-            overlap_text = _get_overlap_text(current_parts, overlap_tokens)
-            current_parts = [overlap_text] if overlap_text else []
-            current_tokens = count_tokens(overlap_text) if overlap_text else 0
+        words = cleaned_content.split()
+        total_word_count = len(words)
+        
+        # If section is small/standard, keep it as a single chunk!
+        if total_word_count <= max_tokens:
+            chunk_text = " ".join(words)
+            page_num = None
+            if page_numbers:
+                char_offset = text.find(words[0][:20])
+                if char_offset >= 0:
+                    for offset, page in sorted(page_numbers.items()):
+                        if offset <= char_offset:
+                            page_num = page
+                        else:
+                            break
 
-        current_parts.append(paragraph)
-        current_tokens += para_tokens
+            chunks.append(AcademicChunk(
+                text=chunk_text,
+                chunk_index=chunk_index,
+                token_count=count_tokens(chunk_text),
+                page_number=page_num,
+                source_section=heading,
+                topic_name=extract_academic_topic(heading + " " + chunk_text),
+            ))
+            chunk_index += 1
+        else:
+            # Split section semantically using sliding token windows
+            pointer = 0
+            while pointer < total_word_count:
+                window = words[pointer : pointer + max_tokens]
+                if len(window) < min_tokens and chunks:
+                    # Merge remainder with last chunk if too small
+                    last = chunks[-1]
+                    last.text += " " + " ".join(window)
+                    last.token_count = count_tokens(last.text)
+                    break
 
-        # If we're past the section heading and above min, consider flushing
-        # at a natural break (heading boundary)
-        if current_tokens >= min_tokens and _is_heading(paragraph):
-            _flush_chunk(current_parts, current_section)
-            overlap_text = _get_overlap_text(current_parts, overlap_tokens)
-            current_parts = [overlap_text] if overlap_text else []
-            current_tokens = count_tokens(overlap_text) if overlap_text else 0
+                chunk_text = " ".join(window)
+                page_num = None
+                if page_numbers:
+                    char_offset = text.find(window[0][:20])
+                    if char_offset >= 0:
+                        for offset, page in sorted(page_numbers.items()):
+                            if offset <= char_offset:
+                                page_num = page
+                            else:
+                                break
 
-    # Flush remainder
-    if current_parts:
-        _flush_chunk(current_parts, current_section)
+                chunks.append(AcademicChunk(
+                    text=chunk_text,
+                    chunk_index=chunk_index,
+                    token_count=count_tokens(chunk_text),
+                    page_number=page_num,
+                    source_section=heading,
+                    topic_name=extract_academic_topic(heading + " " + chunk_text),
+                ))
+                chunk_index += 1
+                pointer += max_tokens - overlap_tokens
 
     logger.info(
-        "Chunked document into %d chunks (min=%d, max=%d tokens, overlap=%.0f%%)",
-        len(chunks), min_tokens, max_tokens, overlap_ratio * 100,
+        "Hierarchical chunker created %d topic-centered chunks from %d heading sections.",
+        len(chunks), len(sections)
     )
     return chunks
-
-
-def _get_overlap_text(parts: list[str], overlap_tokens: int) -> str:
-    """Extract the last N tokens worth of text for overlap."""
-    if not parts or overlap_tokens <= 0:
-        return ""
-    
-    combined = "\n\n".join(parts)
-    words = combined.split()
-    if len(words) <= overlap_tokens:
-        return combined
-    
-    return " ".join(words[-overlap_tokens:])

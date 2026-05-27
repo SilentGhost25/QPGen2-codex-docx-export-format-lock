@@ -1079,15 +1079,13 @@ def export_paper_docx(db: Session, user: User, paper: QuestionPaper) -> Path:
         sec_label = question.get("section_label") or ""
         qno = 1
         subpart = ""
-        match_part = re.match(r"^(\d+)\((.+?)\)$", sec_label.strip())
+        match_part = re.match(r"^(\d+)\(?([a-zA-Z]+)?\)?$", sec_label.strip())
         if match_part:
             qno = int(match_part.group(1))
-            subpart = match_part.group(2)
+            subpart = match_part.group(2) or ""
         else:
-            match_dig = re.match(r"^(\d+)$", sec_label.strip())
-            if match_dig:
-                qno = int(match_dig.group(1))
-                subpart = ""
+            qno = 1
+            subpart = ""
 
         docx_questions.append({
             "text": text,
@@ -1205,7 +1203,7 @@ def seed_demo_data(db: Session) -> None:
         module_title: str,
         focus_terms: list[str],
         module_number: int,
-    ) -> list[tuple[str, int, str, str, str, int]]:
+    ) -> list[tuple[str, int, str, str, str, int, str]]:
         focus_a, focus_b, focus_c, focus_d = focus_terms
         subject_area = subject_name.lower()
         return [
@@ -1216,6 +1214,7 @@ def seed_demo_data(db: Session) -> None:
                 "L2",
                 "easy",
                 module_number,
+                focus_a,
             ),
             (
                 f"Compare {focus_a} and {focus_b} for {module_title.lower()} tasks.",
@@ -1224,6 +1223,7 @@ def seed_demo_data(db: Session) -> None:
                 "L4",
                 "medium",
                 module_number,
+                focus_a,
             ),
             (
                 f"Illustrate the workflow of {focus_c} with a neat diagram and suitable example.",
@@ -1232,6 +1232,7 @@ def seed_demo_data(db: Session) -> None:
                 "L3",
                 "medium",
                 module_number,
+                focus_c,
             ),
             (
                 f"Apply {focus_b} to solve a representative problem in {subject_area}.",
@@ -1240,6 +1241,7 @@ def seed_demo_data(db: Session) -> None:
                 "L3",
                 "medium",
                 module_number,
+                focus_b,
             ),
             (
                 f"Analyze design trade-offs in {focus_d} for scalable {subject_area} systems.",
@@ -1248,6 +1250,7 @@ def seed_demo_data(db: Session) -> None:
                 "L4",
                 "hard",
                 module_number,
+                focus_d,
             ),
             (
                 f"Design an end-to-end {subject_area} solution using {focus_a}, {focus_b}, and {focus_c}.",
@@ -1256,6 +1259,7 @@ def seed_demo_data(db: Session) -> None:
                 "L6",
                 "hard",
                 module_number,
+                focus_a,
             ),
             (
                 f"Justify how {focus_d} improves reliability or accuracy in {module_title.lower()}.",
@@ -1264,6 +1268,7 @@ def seed_demo_data(db: Session) -> None:
                 "L5",
                 "medium",
                 module_number,
+                focus_d,
             ),
             (
                 f"Evaluate the limitations of {focus_c} and propose suitable improvements.",
@@ -1272,6 +1277,7 @@ def seed_demo_data(db: Session) -> None:
                 "L5",
                 "hard",
                 module_number,
+                focus_c,
             ),
         ]
 
@@ -1748,7 +1754,77 @@ def seed_demo_data(db: Session) -> None:
         existing_texts = set(
             db.scalars(select(Question.text).where(Question.subject_id == subject.id))
         )
-        subject_questions: list[tuple[str, int, str, str, str, int]] = []
+        
+        # Seed a dummy document first so that all seeded questions have a source_doc_id
+        doc = db.scalar(
+            select(Document).where(
+                Document.subject_id == subject.id,
+                Document.filename == "seeded_curriculum.pdf"
+            )
+        )
+        if doc is None:
+            doc = Document(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                filename="seeded_curriculum.pdf",
+                mime_type="application/pdf",
+                storage_path="seeded_curriculum.pdf",
+                parsed_text="Seeded curriculum document content containing key syllabus topics.",
+                upload_status="processed"
+            )
+            db.add(doc)
+            db.flush()
+
+        # Seed academic document structured content
+        from app.academic.models import AcademicDocument, KnowledgeChunk
+        acad_doc = db.scalar(
+            select(AcademicDocument).where(
+                AcademicDocument.subject_id == subject.id,
+                AcademicDocument.file_name == "seeded_curriculum.pdf"
+            )
+        )
+        if acad_doc is None:
+            acad_doc = AcademicDocument(
+                subject_id=subject.id,
+                uploaded_by=teacher.id,
+                file_name="seeded_curriculum.pdf",
+                file_type="pdf",
+                document_type="notes",
+                storage_path="seeded_curriculum.pdf",
+                processing_status="completed"
+            )
+            db.add(acad_doc)
+            db.flush()
+
+        # Seed KnowledgeChunks for each focus term
+        for module_number, (module_title, focus_terms) in enumerate(
+            spec["modules"], start=1
+        ):
+            for term in focus_terms:
+                chunk = db.scalar(
+                    select(KnowledgeChunk).where(
+                        KnowledgeChunk.subject_id == subject.id,
+                        KnowledgeChunk.module_number == module_number,
+                        KnowledgeChunk.topic_name == term
+                    )
+                )
+                if chunk is None:
+                    db.add(
+                        KnowledgeChunk(
+                            document_id=acad_doc.id,
+                            subject_id=subject.id,
+                            chunk_text=f"This chunk contains standard curriculum material regarding {term} under module {module_number}.",
+                            chunk_summary=f"Summary of {term}",
+                            chunk_index=1,
+                            module_number=module_number,
+                            topic_name=term,
+                            bloom_level="L2",
+                            co_mapping=f"CO{module_number}"
+                        )
+                    )
+        db.flush()
+
+        subject_questions: list[tuple[str, int, str, str, str, int, str]] = []
         for module_number, (module_title, focus_terms) in enumerate(
             spec["modules"], start=1
         ):
@@ -1761,7 +1837,7 @@ def seed_demo_data(db: Session) -> None:
                 )
             )
 
-        for text, marks, co, bloom, difficulty, module in subject_questions:
+        for text, marks, co, bloom, difficulty, module, topic in subject_questions:
             if text in existing_texts:
                 continue
             existing_texts.add(text)
@@ -1769,13 +1845,14 @@ def seed_demo_data(db: Session) -> None:
                 Question(
                     subject_id=subject.id,
                     teacher_id=teacher.id,
+                    source_doc_id=doc.id,
                     text=text,
                     marks=marks,
                     course_outcome=co,
                     bloom_level=bloom,
                     difficulty=difficulty,
                     module_number=module,
-                    tags=["seed", "dsatm", "aiml"],
+                    tags=["seed", "dsatm", "aiml", f"topic:{topic}"],
                     is_verified=True,
                 )
             )

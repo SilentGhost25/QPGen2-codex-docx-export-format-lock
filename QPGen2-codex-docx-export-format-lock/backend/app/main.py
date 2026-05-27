@@ -2,6 +2,13 @@ from __future__ import annotations
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TQDM_DISABLE"] = "1"
+from typing import Any
+
+def qget(obj: Any, key: str, default: Any = None) -> Any:
+    """Universal helper to access keys or attributes on mixed dictionaries and objects."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 import logging
 import random
@@ -88,6 +95,7 @@ from .academic.orchestration.generation_healthcheck import run_generation_health
 from .academic.planning.blueprint_engine import build_paper_blueprint, blueprint_to_legacy_slots, QuestionTask
 from .academic.policies import derive_difficulty_for_rbt
 from .academic.sanitization.response_cleaner import clean_question_text
+from .academic.question_sanitizer import sanitize_question, is_quality_rejected
 from .academic.validators.question_validator import validate_question_object
 
 from typing import Any
@@ -467,7 +475,7 @@ async def ai_generate_paper(
         prompt = body.get("prompt") or body.get("prompt_text") or payload.prompt or ""
         instructions = body.get("instructions") or payload.instructions
         co_descriptions = body.get("co_descriptions") or payload.co_descriptions
-        allow_ai_rewrite = body.get("allow_ai_rewrite") or payload.allow_ai_rewrite
+        allow_ai_rewrite = False  # Bypassed to ensure zero live LLM/Ollama requests during generation
         creativity = body.get("creativity") or payload.creativity or 0.7
 
         planned_blueprint = build_paper_blueprint(
@@ -513,14 +521,13 @@ async def ai_generate_paper(
                 left_qno = (mod - 1) * 2 + 1
                 right_qno = (mod - 1) * 2 + 2
                 
-                subpart_chars = ["a", "b", "c", "d", "e"]
-                
                 if len(left_qs) > 1:
                     for idx, q in enumerate(left_qs):
+                        subpart_char = chr(ord('a') + idx) if idx < 26 else f"z{idx-25}"
                         blueprint.append(QuestionTask(
                             question_number=left_qno,
-                            subpart=subpart_chars[idx],
-                            label=f"{left_qno}({subpart_chars[idx]})",
+                            subpart=subpart_char,
+                            label=f"{left_qno}({subpart_char})",
                             module=mod,
                             co=q.course_outcome or "CO1",
                             rbt=q.bloom_level or "L2",
@@ -542,10 +549,11 @@ async def ai_generate_paper(
                     
                 if len(right_qs) > 1:
                     for idx, q in enumerate(right_qs):
+                        subpart_char = chr(ord('a') + idx) if idx < 26 else f"z{idx-25}"
                         blueprint.append(QuestionTask(
                             question_number=right_qno,
-                            subpart=subpart_chars[idx],
-                            label=f"{right_qno}({subpart_chars[idx]})",
+                            subpart=subpart_char,
+                            label=f"{right_qno}({subpart_char})",
                             module=mod,
                             co=q.course_outcome or "CO1",
                             rbt=q.bloom_level or "L2",
@@ -579,160 +587,72 @@ async def ai_generate_paper(
             rbt_dist = sorted({slot.rbt for slot in blueprint})
             rbt_dict = {rbt: round(100 / max(len(rbt_dist), 1)) for rbt in rbt_dist}
             
-            use_rag = any(
-                (
-                    body.get("use_notes", True),
-                    body.get("use_question_bank", True),
-                    body.get("use_previous_papers", False),
-                    body.get("use_syllabus", True),
-                )
-            )
+            # Fetch ALL pre-generated questions for this subject in ONE query to avoid N+1 query overhead!
+            stmt = select(Question).where(Question.subject_id == subject_id)
+            if modules:
+                stmt = stmt.where(Question.module_number.in_(modules))
+            questions_pool = list(db.scalars(stmt))
             
-            if use_rag:
-                from .academic.generation import generate_questions_from_retrieval
-                from .academic.retrieval import RetrievalError
-
-                health = run_generation_healthcheck(db, subject_id=subject_id, modules=modules)
-                if not health.ok:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "message": "Generation healthcheck failed",
-                            "errors": health.errors,
-                            "warnings": health.warnings,
-                            "stats": health.stats,
-                        },
-                    )
-
-                marks_dist = {}
-                for slot in blueprint:
-                    marks_dist[slot.marks] = marks_dist.get(slot.marks, 0) + 1
+            # If pool is empty, expand to all questions of the subject
+            if not questions_pool:
+                questions_pool = list(db.scalars(select(Question).where(Question.subject_id == subject_id)))
                 
-                teacher_id = user.id if user.role == Role.TEACHER else None
-                
-                questions = []
-                pending_slots = list(blueprint)
-                max_retries = 3
-                
-                while pending_slots and max_retries > 0:
-                    try:
-                        result = generate_questions_from_retrieval(
-                            db=db,
-                            subject_id=subject_id,
-                            num_questions=len(pending_slots),
-                            blueprint=pending_slots,
-                            bloom_levels=rbt_dist,
-                            co_targets=list(co_targets.keys()),
-                            module_filter=modules[0] if len(modules) == 1 else None,
-                            additional_instructions=prompt,
-                            creativity_override=creativity,
-                            use_notes=body.get("use_notes", True),
-                            use_question_bank=body.get("use_question_bank", True),
-                            use_previous_papers=body.get("use_previous_papers", False),
-                            use_syllabus=body.get("use_syllabus", True),
-                            teacher_id=teacher_id,
-                        )
-                    except RetrievalError as e:
-                        logger.exception("Retrieval failed during paper generation")
-                        raise HTTPException(
-                            status_code=400,
-                            detail=str(e),
-                        )
-
-                    next_pending_slots = []
-                    gq_by_task_index = {
-                        gq.task_index: gq for gq in result.questions if gq.task_index is not None
-                    }
-                    for index, task in enumerate(pending_slots):
-                        gq = gq_by_task_index.get(index)
-                        if not gq or not gq.text:
-                            next_pending_slots.append(task)
-                            continue
-                            
-                        cleaned_text = clean_question_text(gq.text)
-                        from .academic.sanitization.response_cleaner import validate_question_text
-                        if not validate_question_text(cleaned_text):
-                            logger.warning("Generated question failed text validation (artifact leak detected): %s", cleaned_text)
-                            next_pending_slots.append(task)
-                            continue
-                            
-                        q_row = Question(
-                            subject_id=subject_id,
-                            teacher_id=user.id,
-                            text=cleaned_text,
-                            marks=task.marks,
-                            course_outcome=task.co,
-                            bloom_level=task.rbt,
-                            difficulty="balanced",
-                            module_number=task.module,
-                            tags=["rag-generated"],
-                            is_verified=gq.confidence >= 0.8,
-                        )
-                        db.add(q_row)
-                        db.flush()
-                        q_row._confidence = gq.confidence
-                        q_row._source_documents = gq.source_documents
-                        q_row._figure_image_paths = gq.figure_image_paths
-                        q_row._validation_warnings = getattr(gq, "validation_warnings", [])
-                        q_row._blueprint_slot = task
-                        questions.append(q_row)
-                        
-                    pending_slots = next_pending_slots
-                    max_retries -= 1
-
-                # Bulletproof fallback filler: if slots remain, compile on the fly deterministically!
-                if pending_slots:
-                    logger.warning("Compiler filling remaining %d slots after RAG fetch...", len(pending_slots))
-                    from .academic.templates import compile_question
-                    for slot in pending_slots:
-                        q_text = compile_question(
-                            topic="Syllabus Concepts",
-                            bloom_level=slot.rbt or "L3",
-                            keywords=["core principles"],
-                            marks=slot.marks,
-                            is_image_question=False
-                        )
-                        q_row = Question(
-                            subject_id=subject_id,
-                            teacher_id=user.id,
-                            text=q_text,
-                            marks=slot.marks,
-                            course_outcome=slot.co,
-                            bloom_level=slot.rbt,
-                            difficulty="balanced",
-                            module_number=slot.module,
-                            tags=["rag-generated"],
-                            is_verified=True,
-                        )
-                        db.add(q_row)
-                        db.flush()
-                        q_row._confidence = 1.0
-                        q_row._source_documents = []
-                        q_row._figure_image_paths = []
-                        q_row._validation_warnings = []
-                        q_row._blueprint_slot = slot
-                        questions.append(q_row)
-                    
-                coverage_stats = _build_coverage_stats(
-                    questions,
-                    blueprint,
-                    modules,
-                    rbt_dict,
-                    co_targets,
+            if not questions_pool:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No questions available in the question bank for this subject. Please upload a question bank PDF first.",
                 )
-            else:
-                selection = await select_questions_for_paper(
-                    db,
-                    subject_id,
-                    max_marks,
-                    modules,
-                    rbt_dict,
-                    co_targets,
-                    "balanced",
-                    prompt,
+
+            # HIERARCHICAL FALLBACK ALLOCATION
+            # Uses the production-grade question_allocator pipeline:
+            # STRICT → BLOOM_RELAX → CO_RELAX → MARKS_RELAX → MODULE_ONLY → QUESTION_SPLIT → TEMPLATE_GENERATED
+            from .academic.question_allocator import allocate_blueprint
+            # Load academic documents for filenames mapping to avoid queries in the loop
+            from .academic.models import AcademicDocument
+            docs_list = list(db.scalars(select(AcademicDocument).where(AcademicDocument.subject_id == subject_id)))
+            doc_name_by_id = {d.id: d.file_name for d in docs_list}
+
+            allocation_results = allocate_blueprint(
+                blueprint=blueprint,
+                pool=questions_pool,
+                db=db,
+                subject_id=subject_id,
+                module_image_map=module_image_map,
+            )
+
+            questions = []
+            used_ids = set()
+            for result in allocation_results:
+                if result.question is None or result.level.value == "unavailable":
+                    continue
+                q = result.question
+                qid = qget(q, "id", -1)
+                if qid > 0:
+                    used_ids.add(qid)
+                # Attach allocation metadata
+                q._blueprint_slot = getattr(q, "_blueprint_slot", None) or (
+                    blueprint[len(questions)] if len(questions) < len(blueprint) else None
                 )
-                questions = selection.questions
-                coverage_stats = selection.coverage_stats
+                q._confidence = result.confidence
+                q._match_level = result.level.value
+                q._match_reason = result.match_reason
+                q._source_topic = result.topic
+                
+                # Fetch source document filename
+                source_doc_id = getattr(q, "source_doc_id", None)
+                doc_name = doc_name_by_id.get(source_doc_id) if source_doc_id else None
+                q._source_documents = getattr(q, "source_documents", []) or ([doc_name] if doc_name else ["Question Bank"])
+                
+                q._validation_warnings = []
+                questions.append(q)
+                
+            coverage_stats = _build_coverage_stats(
+                questions,
+                blueprint,
+                modules,
+                rbt_dict,
+                co_targets,
+            )
 
         if not questions:
             raise HTTPException(
@@ -764,20 +684,23 @@ async def ai_generate_paper(
 
         questions_data = [
             {
-                "id": q.id,
-                "text": q.text,
-                "marks": blueprint[index].marks if index < len(blueprint) else q.marks,
-                "course_outcome": blueprint[index].co if index < len(blueprint) else q.course_outcome,
-                "bloom_level": blueprint[index].rbt if index < len(blueprint) else q.bloom_level,
-                "difficulty": "balanced",
-                "module_number": blueprint[index].module if index < len(blueprint) else q.module_number,
+                "id": qget(q, "id"),
+                "text": qget(q, "text", ""),
+                "marks": blueprint[index].marks if index < len(blueprint) else qget(q, "marks", 5),
+                "course_outcome": blueprint[index].co if index < len(blueprint) else qget(q, "course_outcome", ""),
+                "bloom_level": blueprint[index].rbt if index < len(blueprint) else qget(q, "bloom_level", ""),
+                "difficulty": qget(q, "difficulty", "balanced"),
+                "module_number": blueprint[index].module if index < len(blueprint) else qget(q, "module_number", 1),
                 "question_number": blueprint[index].question_number if index < len(blueprint) else (index + 1),
                 "subpart": blueprint[index].subpart if index < len(blueprint) else "",
                 "section_label": blueprint[index].label if index < len(blueprint) else str(index + 1),
-                "confidence": getattr(q, "_confidence", None),
-                "source_documents": getattr(q, "_source_documents", []),
-                "figure_image_paths": getattr(q, "_figure_image_paths", []),
-                "validation_warnings": getattr(q, "_validation_warnings", []),
+                "confidence": getattr(q, "_confidence", None) or qget(q, "confidence"),
+                "match_level": getattr(q, "_match_level", None),
+                "match_reason": getattr(q, "_match_reason", None),
+                "source_topic": getattr(q, "_source_topic", None),
+                "source_documents": getattr(q, "_source_documents", []) or qget(q, "source_documents", []),
+                "figure_image_paths": getattr(q, "_figure_image_paths", []) or ([qget(q, "image_path")] if qget(q, "image_path") else []) or qget(q, "figure_image_paths", []),
+                "validation_warnings": getattr(q, "_validation_warnings", []) or [],
                 "blueprint_slot": blueprint[index] if index < len(blueprint) else None
             }
             for index, q in enumerate(questions)
@@ -812,6 +735,9 @@ async def ai_generate_paper(
                 "subpart": item.get("subpart"),
                 "section_label": item.get("section_label"),
                 "confidence": item.get("confidence"),
+                "match_level": item.get("match_level"),
+                "match_reason": item.get("match_reason"),
+                "source_topic": item.get("source_topic"),
                 "source_documents": item.get("source_documents", []),
                 "figure_image_paths": item.get("figure_image_paths", []),
                 "validation_warnings": item.get("validation_warnings", []),
@@ -943,6 +869,82 @@ async def ai_generate_paper(
                 "traceback": traceback.format_exc(),
             },
         )
+
+@app.get("/api/v1/ai/module-questions")
+def get_module_questions(
+    subject_id: int,
+    module: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns candidate questions grouped by module for a given subject.
+    If module is specified, returns only that module's candidate questions.
+    Each candidate question includes specific source info and dynamic auto-recommendation rankings.
+    """
+    # Fetch questions for this subject
+    stmt = select(Question).where(Question.subject_id == subject_id)
+    if module is not None:
+        stmt = stmt.where(Question.module_number == module)
+    
+    questions = list(db.scalars(stmt))
+    
+    # Load academic documents for filenames mapping to show source info
+    from .academic.models import AcademicDocument
+    docs_list = list(db.scalars(select(AcademicDocument).where(AcademicDocument.subject_id == subject_id)))
+    doc_name_by_id = {d.id: d.file_name for d in docs_list}
+    
+    # Group questions by module_number
+    grouped = defaultdict(list)
+    for q in questions:
+        doc_name = doc_name_by_id.get(q.source_doc_id) if q.source_doc_id else None
+        source_docs = getattr(q, "source_documents", []) or ([doc_name] if doc_name else ["Question Bank"])
+        
+        # Calculate a dynamic recommendation score based on quality, marks, and RBT alignment
+        score = 0.0
+        # Verified questions are highly recommended
+        if q.is_verified:
+            score += 0.30
+        # VTU papers highly favor standard 5M and 10M question blocks
+        if q.marks in {5, 10}:
+            score += 0.40
+        # Focus on core RBT levels (L1, L2, L3 are most common)
+        if str(q.bloom_level).upper().strip() in {"L1", "L2", "L3"}:
+            score += 0.30
+        
+        rec_score = round(min(1.0, score), 2)
+        recommended = rec_score >= 0.70
+        
+        grouped[q.module_number].append({
+            "id": q.id,
+            "text": q.text,
+            "marks": q.marks,
+            "co": q.course_outcome,
+            "rbt": q.bloom_level,
+            "difficulty": q.difficulty,
+            "topic": q.tags[0] if q.tags else f"Module {q.module_number} Topic",
+            "source": source_docs[0] if source_docs else "Question Bank",
+            "recommendation_score": rec_score,
+            "recommended": recommended
+        })
+        
+    # Sort candidate questions by recommendation score descending so that best grounded questions show first!
+    for mod_num in grouped:
+        grouped[mod_num].sort(key=lambda x: x["recommendation_score"], reverse=True)
+        
+    if module is not None:
+        return {
+            "module": module,
+            "questions": grouped[module]
+        }
+        
+    return [
+        {
+            "module": mod_num,
+            "questions": grouped[mod_num]
+        }
+        for mod_num in sorted(grouped.keys())
+    ]
 
 @app.get("/api/v1/questions", response_model=list[QuestionResponse])
 def list_questions(

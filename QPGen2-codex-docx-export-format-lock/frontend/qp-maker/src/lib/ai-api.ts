@@ -304,9 +304,54 @@ export function usePapers() {
     queryFn: async () => {
       return fetchWithAuth<GeneratedPaper[]>("/papers");
     },
-    staleTime: 30000,
-    gcTime: 5 * 60 * 1000,
   });
+}
+
+export interface GeneratePaperParams {
+  subject_id: number;
+  title: string;
+  exam_type: string;
+  semester: string;
+  batch: string;
+  max_marks: number;
+  duration_minutes: number;
+  exam_date?: string;
+  teaching_department: string;
+  prompt: string;
+  rbt_levels: string[];
+  module_numbers: number[];
+  module_co_map?: Record<number, string>;
+  module_image_map?: Record<number, boolean>;
+  co_targets?: Record<string, number>;
+  co_descriptions?: Record<string, string>;
+  difficulty?: string;
+  instructions?: string;
+  manual_question_ids?: number[];
+  creativity?: number;
+  use_notes?: boolean;
+  use_question_bank?: boolean;
+  use_previous_papers?: boolean;
+  use_syllabus?: boolean;
+}
+
+export interface QuestionBankSummary {
+  total_documents: number;
+  total_questions: number;
+  verified_questions: number;
+  pending_questions: number;
+  retrieval_ready_questions: number;
+  by_module: Record<string, number>;
+  by_rbt: Record<string, number>;
+  by_co: Record<string, number>;
+  by_difficulty: Record<string, number>;
+  recent_documents: Array<{
+    id: number;
+    filename: string;
+    upload_status: string;
+    created_at: string;
+    question_count: number;
+  }>;
+  gaps: string[];
 }
 
 export function useDownloadPaper() {
@@ -322,6 +367,22 @@ export function useDownloadPaper() {
       }
 
       return response.blob();
+    },
+  });
+}
+
+export function useUpdateQuestion() {
+  const queryClient = useQueryClient();
+  return useMutation<any, Error, { id: number; text?: string; marks?: number; course_outcome?: string; bloom_level?: string; difficulty?: string; module_number?: number }>({
+    mutationFn: async (params) => {
+      const { id, ...body } = params;
+      return fetchWithAuth<any>(`/questions/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["questions"] });
     },
   });
 }

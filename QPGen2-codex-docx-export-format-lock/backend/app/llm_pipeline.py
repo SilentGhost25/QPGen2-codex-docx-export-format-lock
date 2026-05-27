@@ -16,6 +16,7 @@ import httpx
 import numpy as np
 
 from .config import settings
+from .academic.templates import sanitize_and_normalize_question
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,7 @@ class QuestionGenerator:
         topic: str,
         difficulty: str,
         subject_code: str = "N/A",
+        bloom_level: str | None = None,
     ) -> str | None:
         """Generate a new question from a base question."""
         
@@ -309,8 +311,13 @@ Generate the new question:
             new_q = re.sub(r'^\s*Show\s*:\s*', '', new_q, flags=re.IGNORECASE)
             new_q = new_q.strip()
             if new_q and len(new_q) > 10:
-                logger.info(f"Generated {difficulty} question: {new_q[:50]}...")
-                return new_q
+                # Resolve bloom level fallback
+                b_level = bloom_level
+                if not b_level:
+                    b_level = "L2" if difficulty.lower() == "easy" else ("L3" if difficulty.lower() == "medium" else "L4")
+                sanitized = sanitize_and_normalize_question(new_q, b_level, topic)
+                logger.info(f"Generated {difficulty} question: {sanitized[:50]}...")
+                return sanitized
         
         logger.warning(f"Generation failed for {difficulty} question")
         return None
@@ -328,6 +335,7 @@ class ImageQuestionGenerator:
         topic: str,
         difficulty: str,
         subject_code: str = "N/A",
+        bloom_level: str | None = None,
     ) -> str | None:
         """Generate a new question referencing a diagram."""
         
@@ -375,8 +383,13 @@ Generate the new question:
             new_q = re.sub(r'^\s*Show\s*:\s*', '', new_q, flags=re.IGNORECASE)
             new_q = new_q.strip()
             if new_q and len(new_q) > 10:
-                logger.info(f"Generated {difficulty} image question: {new_q[:50]}...")
-                return new_q
+                # Resolve bloom level fallback
+                b_level = bloom_level
+                if not b_level:
+                    b_level = "L2" if difficulty.lower() == "easy" else ("L3" if difficulty.lower() == "medium" else "L4")
+                sanitized = sanitize_and_normalize_question(new_q, b_level, topic)
+                logger.info(f"Generated {difficulty} image question: {sanitized[:50]}...")
+                return sanitized
         
         logger.warning(f"Generation failed for {difficulty} image question")
         return None

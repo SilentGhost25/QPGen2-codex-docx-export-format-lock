@@ -262,8 +262,8 @@ def build_paper_blueprint(
     selected_modules = modules or [1, 2, 3, 4, 5]
     module_blocks = []
     
-    if max_marks == 50:
-        # IAT Paper (50 Marks)
+    if max_marks < 100:
+        # IAT Paper (< 100 Marks)
         # Allowed: single question (10 marks) or 2 subquestions (5+5 marks). NO 3-subquestion modules.
         # Exactly two alternatives per module (e.g. Q1 OR Q2)
         for m in selected_modules:
@@ -356,7 +356,7 @@ def build_paper_blueprint(
                 # 1 or 2 subquestions format
                 # Let's decide randomly for each question option
                 # Left
-                is_two_part_left = False
+                is_two_part_left = random.choice([True, False])
                 rbt_l = random.choice(allowed_rbts) if allowed_rbts else "L" + str(min(module + 1, 6))
                 if is_two_part_left:
                     subparts_left = [
@@ -373,7 +373,7 @@ def build_paper_blueprint(
                 )
                 
                 # Right
-                is_two_part_right = False
+                is_two_part_right = random.choice([True, False])
                 rbt_r = random.choice(allowed_rbts) if allowed_rbts else "L" + str(min(module + 1, 6))
                 if is_two_part_right:
                     subparts_right = [

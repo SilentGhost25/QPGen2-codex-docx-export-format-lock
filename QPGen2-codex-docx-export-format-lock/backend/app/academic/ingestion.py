@@ -22,9 +22,11 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from .chunking import AcademicChunk, semantic_chunk, count_tokens
+from .chunking import AcademicChunk, semantic_chunk, count_tokens, infer_microchunk_type
 from .classifier import classify_chunk
 from ..llm_pipeline import LLMCall
+from ..models import Question
+
 from .models import (
     AcademicDocument,
     ChunkApprovalStatus,
@@ -344,6 +346,104 @@ def create_document_record(
     db.refresh(doc)
     return doc
 
+def pre_generate_topic_variants(
+    db: Session,
+    doc_id: int,
+    subject_id: int,
+    teacher_id: int,
+    db_chunks: list[KnowledgeChunk],
+) -> list[Question]:
+    """Pre-generate a rich set of question variants (5M, 10M, split, image, definition, etc.)
+    for every unique topic discovered in the ingested document.
+    This guarantees high coverage and stable allocation during the review stage.
+    """
+    from .templates import compile_question
+    from ..models import Question
+
+    # Group by unique topic_name
+    topics_map = {}
+    for chunk in db_chunks:
+        if not chunk.topic_name or chunk.topic_name.lower() == "unclassified":
+            continue
+        topic = chunk.topic_name
+        if topic not in topics_map:
+            topics_map[topic] = {
+                "module": chunk.module_number or 1,
+                "co": chunk.co_mapping or "CO1",
+                "bloom": chunk.bloom_level or "L2",
+                "keywords": [chunk.topic_name],
+            }
+
+    generated_questions = []
+    used_templates = set()
+
+    # Define the variants to generate per topic
+    # Format: (suffix_name, bloom_level, marks, is_image, tag)
+    variant_specs = [
+        # 5M variants (3-5 variants)
+        ("5M_v1", "L2", 5, False, "variant:5M"),
+        ("5M_v2", "L2", 5, False, "variant:5M"),
+        ("5M_v3", "L3", 5, False, "variant:5M"),
+        # 10M variants (3-5 variants)
+        ("10M_v1", "L2", 10, False, "variant:10M"),
+        ("10M_v2", "L3", 10, False, "variant:10M"),
+        ("10M_v3", "L4", 10, False, "variant:10M"),
+        # split variants (2-3 variants)
+        ("split_v1", "L2", 5, False, "variant:split"),
+        ("split_v2", "L3", 5, False, "variant:split"),
+        # application (2 variants)
+        ("app_v1", "L3", 5, False, "variant:application"),
+        ("app_v2", "L3", 10, False, "variant:application"),
+        # analytical (2 variants)
+        ("analysis_v1", "L4", 5, False, "variant:analysis"),
+        ("analysis_v2", "L4", 10, False, "variant:analysis"),
+        # image-based (1-2 variants)
+        ("image_v1", "L2", 5, True, "variant:image"),
+        ("image_v2", "L3", 10, True, "variant:image"),
+        # definition / short-answer
+        ("def_v1", "L1", 2, False, "variant:definition"),
+        ("def_v2", "L1", 5, False, "variant:definition"),
+    ]
+
+    for topic_name, meta in topics_map.items():
+        module = meta["module"]
+        co = meta["co"]
+        keywords = meta["keywords"]
+
+        for suffix, bloom, marks, is_image, variant_tag in variant_specs:
+            try:
+                text = compile_question(
+                    topic=topic_name,
+                    bloom_level=bloom,
+                    keywords=keywords,
+                    marks=marks,
+                    is_image_question=is_image,
+                    used_templates=used_templates,
+                )
+                q = Question(
+                    subject_id=subject_id,
+                    teacher_id=teacher_id,
+                    source_doc_id=doc_id,
+                    text=text,
+                    marks=marks,
+                    course_outcome=co,
+                    bloom_level=bloom,
+                    difficulty="balanced" if marks <= 5 else "hard",
+                    module_number=module,
+                    tags=["pre_generated", "variant_compiler", variant_tag, f"topic:{topic_name}"],
+                    is_verified=True,  # pre-generated variants are verified by template compile
+                )
+                generated_questions.append(q)
+            except Exception as e:
+                logger.warning(
+                    "Failed compiling variant %s for topic %s: %s",
+                    suffix,
+                    topic_name,
+                    e,
+                )
+
+    return generated_questions
+
 
 def process_document_background(
     document_id: int,
@@ -583,6 +683,7 @@ def process_document_background(
                     document_id=doc.id,
                     subject_id=doc.subject_id,
                     chunk_text=chunk.text,
+                    chunk_summary=infer_microchunk_type(chunk.text),
                     chunk_index=chunk.chunk_index,
                     token_count=chunk.token_count,
                     module_number=module_number,
@@ -664,6 +765,28 @@ def process_document_background(
             db.add_all(db_questions)
             db.commit()
 
+            # --- PRE-GENERATE MULTIPLE VARIANTS PER TOPIC ---
+            try:
+                variants = pre_generate_topic_variants(
+                    db=db,
+                    doc_id=doc.id,
+                    subject_id=doc.subject_id,
+                    teacher_id=doc.uploaded_by,
+                    db_chunks=db_chunks,
+                )
+                if variants:
+                    db.add_all(variants)
+                    db.commit()
+                    # Append to db_questions so their embeddings are also generated!
+                    db_questions.extend(variants)
+                    logger.info(
+                        "Pre-generated %d topic variants for document %d",
+                        len(variants),
+                        doc.id,
+                    )
+            except Exception as ev:
+                logger.error("Failed pre-generating topic variants: %s", ev)
+
             elapsed = time.time() - start_time
             logger.info(
                 "Ingested '%s': %d pages, %d chunks, %d questions in %.2fs",
@@ -690,6 +813,15 @@ def process_document_background(
 
             doc.processing_status = ProcessingStatus.COMPLETED
             db.commit()
+            
+            # Dynamically regenerate Course Outcome (CO) descriptions based on newly ingested content!
+            try:
+                from .co_description_generator import generate_subject_co_descriptions
+                generate_subject_co_descriptions(db, doc.subject_id)
+                logger.info("Automatically generated dynamic CO descriptions for subject %d", doc.subject_id)
+            except Exception as eco:
+                logger.error("Failed to automatically generate dynamic CO descriptions: %s", eco)
+
             logger.info("Completed embedding generation for doc %d synchronously in background thread", doc.id)
 
         except Exception as e:

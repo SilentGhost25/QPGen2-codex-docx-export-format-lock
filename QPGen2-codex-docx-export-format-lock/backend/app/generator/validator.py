@@ -24,8 +24,8 @@ def validate_slots(
     for slot in slots:
         modules_seen.setdefault(slot.module, []).append(slot)
 
-    # Rule 1: exactly 5 modules
-    if len(modules_seen) != 5:
+    # Rule 1: exactly 5 modules for semester-end papers
+    if expected_total_marks >= 100 and len(modules_seen) != 5:
         errors.append(
             f"Expected 5 modules, found {len(modules_seen)}: "
             f"{sorted(modules_seen.keys())}"
